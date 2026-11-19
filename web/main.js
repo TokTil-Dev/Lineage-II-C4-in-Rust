@@ -321,7 +321,10 @@ canvas.addEventListener('wheel', event => {
     if (ready) worker.postMessage({type:'wheel',values:[Math.round(event.offsetX),Math.round(event.offsetY),-Math.sign(event.deltaY)]});
 },{passive:false});
 if (mode === 'cache') start(null);
-if (config.clientUrl && !mode && new URLSearchParams(location.search).get('gate')!=='1') play.click();
+if (config.clientUrl && (!mode || mode==='demo') && new URLSearchParams(location.search).get('gate')!=='1') {
+    if (mode==='demo') styleSelect.value='classic';
+    play.click();
+}
 
 canvas.addEventListener('paste',event=>{
     if (!ready) return;
