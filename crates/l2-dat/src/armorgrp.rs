@@ -1,6 +1,8 @@
 use crate::{DatReader, Error};
 
 pub const ROWS: usize = 15;
+pub const ROWS_HIGH_FIVE: usize = 16;
+const DROP_MATERIALS_HIGH_FIVE: usize = 9;
 pub const TAG_WEAPON: u32 = 0;
 pub const TAG_ARMOR: u32 = 1;
 
@@ -59,9 +61,13 @@ impl Armor {
 }
 
 pub fn read(body: &[u8]) -> Result<Vec<Armor>, Error> {
+    read_as(body, crate::Chronicle::C4)
+}
+
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<Armor>, Error> {
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;
-    (0..count).map(|_| record(&mut reader)).collect()
+    (0..count).map(|_| record(&mut reader, chronicle)).collect()
 }
 
 pub const ICONS: usize = 5;
@@ -89,11 +95,28 @@ pub struct ItemHead {
 }
 
 pub fn item_head(r: &mut DatReader<'_>) -> Result<ItemHead, Error> {
+    item_head_as(r, crate::Chronicle::C4)
+}
+
+pub fn item_head_as(r: &mut DatReader<'_>, chronicle: crate::Chronicle) -> Result<ItemHead, Error> {
+    let high_five = chronicle == crate::Chronicle::HighFive;
     let tag = r.u32()?;
     let id = r.u32()?;
     let mut drop = ItemDrop { style: r.u32()?, parameter_14: r.u32()?, radius: r.u32()?, height: r.u32()?, parameter_20: r.u32()?, ..Default::default() };
     for mesh in &mut drop.meshes { *mesh = r.unicode()?; }
-    for material in &mut drop.materials { *material = r.unicode()?; }
+    if high_five {
+        for index in 0..DROP_MATERIALS_HIGH_FIVE {
+            let material = r.unicode()?;
+            if let Some(slot) = drop.materials.get_mut(index) {
+                *slot = material;
+            }
+        }
+        for _ in 0..drop.meshes.len() {
+            r.u32()?;
+        }
+    } else {
+        for material in &mut drop.materials { *material = r.unicode()?; }
+    }
     let mut icons: [String; ICONS] = Default::default();
     for icon in &mut icons {
         *icon = r.unicode()?;
@@ -103,29 +126,66 @@ pub fn item_head(r: &mut DatReader<'_>) -> Result<ItemHead, Error> {
     r.u32()?;
     let crystallizable = r.u32()? != 0;
     let type1 = r.u32()?;
+    if high_five {
+        r.u32_array()?;
+        r.u32()?;
+        r.unicode()?;
+    }
     Ok(ItemHead { tag, id, drop, icons, weight, crystallizable, type1 })
 }
 
-fn record(r: &mut DatReader<'_>) -> Result<Armor, Error> {
-    let head = item_head(r)?;
-    let mut armor = body(r, head.id)?;
+fn record(r: &mut DatReader<'_>, chronicle: crate::Chronicle) -> Result<Armor, Error> {
+    let head = item_head_as(r, chronicle)?;
+    let mut armor = body_as(r, head.id, chronicle)?;
     armor.crystallizable = head.crystallizable;
     Ok(armor)
 }
 
 pub fn body(r: &mut DatReader<'_>, id: u32) -> Result<Armor, Error> {
+    body_as(r, id, crate::Chronicle::C4)
+}
+
+fn row_high_five(r: &mut DatReader<'_>) -> Result<ArmorRow, Error> {
+    let meshes = r.unicode_array()?;
+    let textures = r.unicode_array()?;
+    let count = r.u32()?;
+    let ex_meshes = (0..count)
+        .map(|_| {
+            let name = r.unicode()?;
+            r.u16()?;
+            Ok(name)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let ex_textures = r.unicode_array()?;
+    r.unicode()?;
+    Ok(ArmorRow { meshes, textures, ex_meshes, ex_textures })
+}
+
+pub fn body_as(r: &mut DatReader<'_>, id: u32, chronicle: crate::Chronicle) -> Result<Armor, Error> {
+    let high_five = chronicle == crate::Chronicle::HighFive;
     let body_part = r.u32()?;
-    let mut rows = Vec::with_capacity(ROWS);
-    for _ in 0..ROWS {
-        rows.push(ArmorRow {
-            meshes: r.unicode_array()?,
-            textures: r.unicode_array()?,
-            ex_meshes: r.unicode_array()?,
-            ex_textures: r.unicode_array()?,
-        });
+    let mut rows = Vec::with_capacity(ROWS_HIGH_FIVE);
+    if high_five {
+        for _ in 0..ROWS_HIGH_FIVE {
+            rows.push(row_high_five(r)?);
+        }
+    } else {
+        for _ in 0..ROWS {
+            rows.push(ArmorRow {
+                meshes: r.unicode_array()?,
+                textures: r.unicode_array()?,
+                ex_meshes: r.unicode_array()?,
+                ex_textures: r.unicode_array()?,
+            });
+        }
     }
     let npc_meshes = r.unicode_array()?;
     let npc_textures = r.unicode_array()?;
+    if high_five {
+        for _ in 0..3 {
+            r.u32()?;
+        }
+    }
     let damage_effect = r.unicode()?;
     let boots_sounds = r.unicode_array()?;
     let drop_sound = r.unicode()?;
@@ -134,6 +194,9 @@ pub fn body(r: &mut DatReader<'_>, id: u32) -> Result<Armor, Error> {
     let mut attributes_58c = [0; 6];
     for value in &mut attributes_58c {
         *value = r.i32()?;
+    }
+    if high_five {
+        r.i32()?;
     }
     Ok(Armor { id, drop_sound, equip_sound, boots_sounds, body_part, rows, npc_meshes, npc_textures, damage_effect, attributes_58c, crystallizable: false })
 }

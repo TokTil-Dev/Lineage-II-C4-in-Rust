@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 ue2-core = { path = "../ue2-core" }
 thiserror.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 l2-crypto = { path = "../l2-crypto" }

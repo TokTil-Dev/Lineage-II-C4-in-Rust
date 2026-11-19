@@ -14,6 +14,30 @@ pub fn read(body: &[u8]) -> Result<Vec<Castle>, Error> {
     read_with_tail(body).map(|(rows, _)| rows)
 }
 
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<Castle>, Error> {
+    match chronicle {
+        crate::Chronicle::C4 | crate::Chronicle::Interlude => read(body),
+        crate::Chronicle::HighFive => read_high_five_with_tail(body).map(|(rows, _)| rows),
+    }
+}
+
+pub fn read_high_five_with_tail(body: &[u8]) -> Result<(Vec<Castle>, &[u8]), Error> {
+    let mut reader = DatReader::new(body);
+    let count = reader.u32()?;
+    let rows = (0..count)
+        .map(|_| {
+            let castle = record(&mut reader)?;
+            for _ in 0..HIGH_FIVE_EXTRA_TEXTS {
+                reader.ascf()?;
+            }
+            Ok(castle)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    Ok((rows, &body[body.len() - reader.remaining()..]))
+}
+
+const HIGH_FIVE_EXTRA_TEXTS: usize = 4;
+
 pub fn read_with_tail(body: &[u8]) -> Result<(Vec<Castle>, &[u8]), Error> {
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;

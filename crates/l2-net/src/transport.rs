@@ -3,6 +3,7 @@ use crate::login::{
     Authorization, CipherError, GameServer, LoginCipher, LoginError, LoginFlow, LoginNotice, LoginPhase, LoginStep,
     init_is_plaintext,
 };
+use l2_dat::Chronicle;
 use std::io::{self, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
@@ -70,7 +71,19 @@ pub fn authenticate(
     password: &str,
     timeout: Duration,
 ) -> Result<Authorization, TransportError> {
-    run_login(host, port, LoginFlow::new(user, password)?, timeout, |_| true, |_| None, |_, _, _| None)
+    authenticate_for(Chronicle::C4, host, port, user, password, timeout)
+}
+
+pub fn authenticate_for(
+    chronicle: Chronicle,
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    timeout: Duration,
+) -> Result<Authorization, TransportError> {
+    let flow = LoginFlow::for_chronicle(chronicle, user, password, false)?;
+    run_login(host, port, flow, timeout, |_| true, |_| None, |_, _, _| None)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -84,7 +97,23 @@ pub fn authenticate_choosing(
     choose: impl FnMut(&[GameServer]) -> Option<u8>,
     card: impl FnMut(i32, i8, bool) -> Option<i32>,
 ) -> Result<Authorization, TransportError> {
-    run_login(host, port, LoginFlow::choosing(user, password)?, timeout, notice, choose, card)
+    authenticate_choosing_for(Chronicle::C4, host, port, user, password, timeout, notice, choose, card)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn authenticate_choosing_for(
+    chronicle: Chronicle,
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    timeout: Duration,
+    notice: impl FnMut(&LoginNotice) -> bool,
+    choose: impl FnMut(&[GameServer]) -> Option<u8>,
+    card: impl FnMut(i32, i8, bool) -> Option<i32>,
+) -> Result<Authorization, TransportError> {
+    let flow = LoginFlow::for_chronicle(chronicle, user, password, true)?;
+    run_login(host, port, flow, timeout, notice, choose, card)
 }
 
 fn run_login(
@@ -96,13 +125,14 @@ fn run_login(
     mut choose: impl FnMut(&[GameServer]) -> Option<u8>,
     mut card: impl FnMut(i32, i8, bool) -> Option<i32>,
 ) -> Result<Authorization, TransportError> {
-    let cipher = LoginCipher::c4();
+    let mut cipher = if flow.is_modern() { LoginCipher::init() } else { LoginCipher::c4() };
     let mut stream = connect(&format!("{host}:{port}"), timeout)?;
     let mut init_pending = true;
     loop {
         let raw = frame::read(&mut stream).map_err(|e| match e.kind() {
             io::ErrorKind::UnexpectedEof => TransportError::Closed(match flow.phase() {
                 LoginPhase::Init => "o login server fechou a conexão antes do Init",
+                LoginPhase::GameGuard => "o login server fechou a conexão ao receber o AuthGameGuard",
                 LoginPhase::LoginOk => {
                     "o login server fechou a conexão ao receber as credenciais; conta já online ou pedido malformado"
                 }
@@ -113,13 +143,20 @@ fn run_login(
             }),
             _ => TransportError::Io(e),
         })?;
-        let body = if init_pending && init_is_plaintext(&raw) {
+        let body = if flow.is_modern() && init_pending {
+            init_pending = false;
+            cipher.open_init(&raw)?
+        } else if init_pending && init_is_plaintext(&raw) {
             init_pending = false;
             raw
         } else {
             cipher.open(&raw)?
         };
-        match flow.step(&body)? {
+        let step = flow.step(&body)?;
+        if let Some(key) = flow.take_session_key() {
+            cipher = LoginCipher::session(&key);
+        }
+        match step {
             LoginStep::Send(mut reply) => {
                 stream.write_all(&checked_frame(&cipher.seal(&reply))?)?;
                 reply.fill(0);
@@ -215,6 +252,40 @@ mod tests {
     fn frame_rejects_lengths_below_header() {
         let mut cursor = Cursor::new(vec![1u8, 0]);
         assert!(frame::read(&mut cursor).is_err());
+    }
+
+    #[test]
+    fn game_connection_runs_the_high_five_opening_against_a_fake_server() {
+        use crate::game::high_five;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let opening = frame::read(&mut socket).unwrap();
+            assert_eq!(opening, high_five::protocol_version(high_five::PROTOCOL_VERSION));
+            let mut key_packet = vec![0x2e, 1, 9, 8, 7, 6, 5, 4, 3, 2];
+            key_packet.extend_from_slice(&[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0]);
+            socket.write_all(&frame::encode(&key_packet)).unwrap();
+            let mut crypt = GameCrypt::from_key_packet_high_five(&key_packet).unwrap();
+            let mut first = frame::read(&mut socket).unwrap();
+            crypt.decrypt(&mut first);
+            assert_eq!(first[0], 0x2b);
+            let mut second = frame::read(&mut socket).unwrap();
+            crypt.decrypt(&mut second);
+            assert_eq!(second, high_five::request_character_selection());
+            let mut reply = vec![0x09, 0, 0, 0, 0, 7, 0, 0, 0, 0];
+            crypt.encrypt(&mut reply);
+            socket.write_all(&frame::encode(&reply)).unwrap();
+        });
+        let mut game = GameConnection::connect(&addr.to_string(), Duration::from_secs(5)).unwrap();
+        game.send(high_five::protocol_version(high_five::PROTOCOL_VERSION)).unwrap();
+        let key_packet = game.receive().unwrap();
+        game.enable_crypt(GameCrypt::from_key_packet_high_five(&key_packet).unwrap());
+        game.send(vec![0x2b, 0, 0]).unwrap();
+        game.send(high_five::request_character_selection()).unwrap();
+        let list = game.receive().unwrap();
+        assert_eq!(high_five::read_char_select_info(&list).unwrap().max_slots, 7);
+        server.join().unwrap();
     }
 
     #[test]
@@ -374,5 +445,88 @@ mod tests {
             TransportError::Closed(msg) => assert!(msg.contains("credenciais")),
             other => panic!("esperava TransportError::Closed, veio {other}"),
         }
+    }
+
+    fn modern_modulus() -> [u8; 128] {
+        let mut modulus = [0u8; 128];
+        for (i, b) in modulus.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(53).wrapping_add(7);
+        }
+        modulus[0] = 0xc3;
+        modulus
+    }
+
+    fn modern_server_list() -> Vec<u8> {
+        let mut list = vec![4u8, 2, 2];
+        for id in [1u8, 2] {
+            list.extend_from_slice(&[id, 127, 0, 0, id]);
+            list.extend_from_slice(&7777u32.to_le_bytes());
+            list.extend_from_slice(&[0, 1, 3, 0, 9, 0, 1, 0, 0, 0, 0, 0]);
+        }
+        list.extend_from_slice(&0u16.to_le_bytes());
+        list.extend_from_slice(&[1, 2, 1, 1]);
+        list.extend_from_slice(&3600u32.to_le_bytes());
+        list
+    }
+
+    #[test]
+    fn authenticate_for_high_five_runs_init_game_guard_rsa_login_and_server_list() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let session_key = [0x42u8; 16];
+            let guard = [0x4e, 0x95, 0xdd, 0x29, 0xfc, 0x9c, 0xc3, 0x77, 0x20, 0xb6, 0xad, 0x97, 0xf7, 0xe0, 0xbd, 0x07];
+            let modulus = modern_modulus();
+            let mut scrambled = modulus;
+            crate::login::rsa::scramble_modulus(&mut scrambled);
+            let mut init = vec![0u8];
+            init.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+            init.extend_from_slice(&0xc621u32.to_le_bytes());
+            init.extend_from_slice(&scrambled);
+            init.extend_from_slice(&guard);
+            init.extend_from_slice(&session_key);
+            init.push(0);
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.write_all(&frame::encode(&LoginCipher::init().seal_init(&init, 0x5566_7788))).unwrap();
+            let cipher = LoginCipher::session(&session_key);
+            let gg = cipher.open(&frame::read(&mut socket).unwrap()).unwrap();
+            assert_eq!(gg[0], 7);
+            assert_eq!(&gg[1..5], &0x0102_0304u32.to_le_bytes());
+            assert_eq!(&gg[5..21], &guard);
+            let mut ack = vec![0x0bu8];
+            ack.extend_from_slice(&0x0102_0304u32.to_le_bytes());
+            ack.extend_from_slice(&[0u8; 16]);
+            socket.write_all(&frame::encode(&cipher.seal(&ack))).unwrap();
+            let login = cipher.open(&frame::read(&mut socket).unwrap()).unwrap();
+            assert_eq!(login[0], 0);
+            let block = crate::login::rsa::credentials_block(b"conta", b"senha").unwrap();
+            let expected = crate::login::rsa::encrypt_no_padding(&modulus, &block).unwrap();
+            assert_eq!(&login[1..129], &expected[..]);
+            assert_eq!(&login[129..133], &0x0102_0304u32.to_le_bytes());
+            socket.write_all(&frame::encode(&cipher.seal(&modern_server_list()))).unwrap();
+            let play = cipher.open(&frame::read(&mut socket).unwrap()).unwrap();
+            assert_eq!(&play[..10], &[2, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+            let mut playok = vec![7u8];
+            playok.extend_from_slice(&[3, 0, 0, 0, 4, 0, 0, 0]);
+            socket.write_all(&frame::encode(&cipher.seal(&playok))).unwrap();
+        });
+        let auth =
+            authenticate_for(Chronicle::HighFive, "127.0.0.1", addr.port(), "conta", "senha", Duration::from_secs(2)).unwrap();
+        assert_eq!(auth.play_key, [3, 4]);
+        assert_eq!(auth.server.address(), "127.0.0.1:7777");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn high_five_rejects_an_init_with_the_wrong_static_key() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket.write_all(&frame::encode(&[0x11u8; 176])).unwrap();
+        });
+        let err = authenticate_for(Chronicle::HighFive, "127.0.0.1", addr.port(), "conta", "senha", Duration::from_secs(2))
+            .unwrap_err();
+        assert!(matches!(err, TransportError::Cipher(_)));
     }
 }

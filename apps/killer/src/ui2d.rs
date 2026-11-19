@@ -889,6 +889,9 @@ pub struct GameUi {
     modern_menu_pressed: Option<usize>,
     pub tutorial: crate::ui_tutorial::TutorialWindows,
     pub html_tables: Option<std::sync::Arc<DatTables>>,
+    pub interlude: Option<crate::ui_interlude::InterludeUi>,
+    pub script_natives_reported: usize,
+    pub script_me: Option<i32>,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -899,6 +902,56 @@ pub fn load_lobby_font(client: &mut Client) -> Result<BitmapFont, Box<dyn std::e
 }
 
 impl GameUi {
+    pub fn enable_interlude_hud(&mut self, on: bool) {
+        let Some(interlude) = self.interlude.as_mut() else { return };
+        if interlude.enabled == on {
+            return;
+        }
+        interlude.enabled = on;
+        if on {
+            interlude.saved.clear();
+            for id in interlude.ids() {
+                let (Some(size), Some(grip)) = (interlude.size(id), interlude.grip(id)) else { continue };
+                let hidden = interlude.starts_hidden(id);
+                let Some(window) = self.desktop.window_mut(id) else { continue };
+                interlude.saved.push((id, window.rect, window.grip, window.visible));
+                window.rect = Rect::new(window.rect.x, window.rect.y, size.0, size.1);
+                window.grip = grip;
+                if let Some(hidden) = hidden {
+                    window.visible = !hidden;
+                }
+            }
+            let visible: Vec<WindowId> = interlude.ids().into_iter().filter(|id| self.desktop.window(*id).is_some_and(|window| window.visible)).collect();
+            let pending = interlude.script_load(&visible);
+            self.apply_script_events(pending);
+            let Some(interlude) = self.interlude.as_mut() else { return };
+            for _ in 0..2 {
+                let placed: Vec<(WindowId, (i32, i32))> = interlude
+                    .ids()
+                    .into_iter()
+                    .filter_map(|id| {
+                        let rect_of = |other: WindowId| self.desktop.window(other).map(|window| window.rect);
+                        interlude.position(id, self.desktop.size, &rect_of).map(|position| (id, position))
+                    })
+                    .collect();
+                for (id, (x, y)) in placed {
+                    if let Some(window) = self.desktop.window_mut(id) {
+                        window.rect.x = x;
+                        window.rect.y = y;
+                    }
+                }
+            }
+        } else {
+            for (id, rect, grip, visible) in std::mem::take(&mut interlude.saved) {
+                if let Some(window) = self.desktop.window_mut(id) {
+                    window.rect = rect;
+                    window.grip = grip;
+                    window.visible = visible;
+                }
+            }
+        }
+    }
+
     pub fn radar_visible(&self, world: &World) -> bool {
         world.me.is_some() && self.desktop.window(WindowId::RADAR).is_some_and(|window| window.visible)
     }
@@ -907,13 +960,26 @@ impl GameUi {
         let localization = parse_ini(&client.read_system_text(LOCALIZATION_INI)?);
         let fonts = FontSet::from_localization(&localization)
             .ok_or_else(|| AssetError::NotFound(format!("{LOCALIZATION_INI}: fontes da língua")))?;
-        let small = load_font(client, &fonts.small)?;
-        let large = load_font(client, &fonts.large)?;
+        let (small, large, gfx_atlases) = if client.chronicle() == l2_dat::Chronicle::HighFive {
+            load_gfx_fonts(client, &localization)?
+        } else {
+            (load_font(client, &fonts.small)?, load_font(client, &fonts.large)?, Vec::new())
+        };
         let windows_info = WindowsInfo::from_ini(&optional_ini(client, WINDOWS_INFO_INI));
         let option_ini = optional_ini(client, OPTION_INI);
         let options = Options::from_ini(&option_ini);
         let filter = ChatFilter::from_ini(&parse_ini(&client.read_system_text(CHAT_FILTER_INI)?));
         let mut ui = GameUi::new(small, large, options, windows_info, filter, size)?;
+        for atlas in gfx_atlases {
+            let data = killer_assets::textures::TextureData { width: atlas.width, height: atlas.height, format: killer_assets::textures::TextureFormatKind::Rgba8, mips: vec![atlas.rgba()] };
+            ui.texture_bank.insert(&atlas.name, data);
+        }
+        if l2_dat::Chronicle::forced() == Some(l2_dat::Chronicle::Interlude) {
+            match crate::ui_interlude::InterludeUi::load(client, &mut ui.texture_bank, ui.shortcut.vertical, &ui.windows_info) {
+                Ok(interlude) => ui.interlude = Some(interlude),
+                Err(error) => log::warn!("interface.xdat: {error}"),
+            }
+        }
         log::debug!("interface: {} registros instalados em {} raízes", ui.window_registry.manager.count, ui.window_registry.manager.roots.len());
         let font_table = killer_ui::true_font::TrueFontTable::from_ini(&optional_ini(client, TTFONTINFO_INI));
         ui.zone_title_font = TrueTypeFont::zone_title(&optional_ini(client, TTFONTINFO_INI));
@@ -1159,6 +1225,9 @@ impl GameUi {
             modern_menu_pressed: None,
             tutorial: crate::ui_tutorial::TutorialWindows::default(),
             html_tables: None,
+            interlude: None,
+            script_natives_reported: 0,
+            script_me: None,
         };
         ui.follow_chat();
         Ok(ui)
@@ -1615,6 +1684,9 @@ impl GameUi {
     fn html_link_at(&self, id: WindowId, x: i32, y: i32) -> Option<String> {
         let window = self.desktop.window(id).filter(|w| w.visible)?;
         let viewer = self.html_viewer(id)?;
+        if self.interlude.as_ref().is_some_and(|interlude| interlude.enabled) {
+            return crate::ui_interlude::InterludeUi::html_link_at(&viewer.doc.body, viewer.scroll, x - window.rect.x, y - window.rect.y, &self.small);
+        }
         viewer.link_at(x - window.rect.x, y - window.rect.y, &self.small).map(str::to_string)
     }
 
@@ -1652,19 +1724,32 @@ impl GameUi {
         if let Some(window) = self.desktop.window_mut(WindowId::RESTART_MENU) {
             window.visible = views.restart.is_some();
         }
+        let interlude_hud = self.interlude.as_ref().is_some_and(|interlude| interlude.enabled);
         if let Some(window) = self.desktop.window_mut(WindowId::PARTY_STATUS) {
             let height = views.party.height();
             window.visible = height > 0;
-            window.rect.h = height;
-            window.grip = party::grip(height);
+            if !interlude_hud {
+                window.rect.h = height;
+                window.grip = party::grip(height);
+            }
         }
+        let abnormal_interlude = self.interlude.as_ref().filter(|interlude| interlude.enabled).map(|interlude| interlude.abnormal_size(&views.abnormal));
         if let Some(window) = self.desktop.window_mut(WindowId::ABNORMAL_STATUS) {
             let modern=self.shortcut.modern.is_some();
             let (w, h) = if modern {crate::ui_modern_buffs::size(&views.abnormal)}else{views.abnormal.size()};
             window.visible = !views.abnormal.is_empty();
-            window.rect.w = w;
-            window.rect.h = h;
-            window.grip = if modern {Rect::new(0,0,12,h)}else{views.abnormal.grip()};
+            match abnormal_interlude {
+                Some((w, h)) => {
+                    window.rect.w = w;
+                    window.rect.h = h;
+                    window.grip = Rect::new(0, 0, w, h);
+                }
+                None => {
+                    window.rect.w = w;
+                    window.rect.h = h;
+                    window.grip = if modern {Rect::new(0,0,12,h)}else{views.abnormal.grip()};
+                }
+            }
         }
     }
 
@@ -1816,7 +1901,12 @@ impl GameUi {
                 }
             }
         }
-        let (sx, sy) = sysmsg::position_over_chat(chat);
+        let interlude_anchor = self
+            .interlude
+            .as_ref()
+            .filter(|interlude| interlude.enabled)
+            .and_then(|interlude| interlude.position(WindowId::SYSTEM_MSG, self.desktop.size, &|other| self.desktop.window(other).map(|window| window.rect)));
+        let (sx, sy) = interlude_anchor.unwrap_or_else(|| sysmsg::position_over_chat(chat));
         if let Some(window) = self.desktop.window_mut(WindowId::SYSTEM_MSG) {
             window.rect.x = sx;
             window.rect.y = sy;
@@ -1900,6 +1990,9 @@ impl GameUi {
             button_map.extend(list.buttons[first..].iter().map(|button| (window.id, *button)));
         }
         drop(button_map);
+        if let Some(interlude) = self.interlude.as_ref().filter(|interlude| interlude.enabled) {
+            interlude.paint_generic(&mut list, self.cursor, world, &views.party, &self.keys.inventory, &self.shortcut, &views.abnormal, killer_ui::xdat_view::MinimapState { town: None, player: world.me.as_ref().map(|me| (me.position.x as i32, me.position.y as i32)), yaw: views.radar.camera_yaw, targets: world.windows.radar.map_points.iter().map(|p| (p[0], p[1])).collect(), party: Vec::new() }, &self.chat.lists, &self.system_msg.list, &self.chat.input.text, self.html_tables.as_deref().map(|tables| &tables.sysstring), &self.small, self.alpha);
+        }
         if self.shortcut.modern.is_none() && let Some(window) = self.desktop.window(WindowId::CHAT).filter(|w| w.visible) {
             self.chat.paint_filter(&mut list, window.rect.x, window.rect.y, &self.small);
         }
@@ -1944,6 +2037,21 @@ impl GameUi {
 
     pub fn paint_window(&self, list: &mut DrawList, window: &killer_ui::window::Window, world: &World, chat: &[ChatEntry], target: Option<&TargetView>, views: &WorldViews) {
             let (x, y) = (window.rect.x, window.rect.y);
+            if std::env::var_os("KILLER_UI_TRACE").is_some() {
+                log::info!("janela {:?} visível em {:?}, pintor {}", window.id, window.rect, if self.interlude.as_ref().is_some_and(|i| i.enabled && i.handles(window.id)) { "xdat" } else { "C4" });
+            }
+            if let Some(interlude) = self.interlude.as_ref().filter(|interlude| interlude.enabled && crate::ui_interlude::InterludeUi::html_window(window.id)) {
+                if let Some(viewer) = self.html_viewer(window.id) {
+                    let title = interlude.html_title(window.id, &viewer.title);
+                    interlude.paint_html(list, x, y, &title, &viewer.doc.body, viewer.scroll, &self.small, self.alpha);
+                }
+                return;
+            }
+            if let Some(interlude) = self.interlude.as_ref().filter(|interlude| interlude.enabled)
+                && interlude.paint(window.id, list, x, y, (self.cursor.0 - x, self.cursor.1 - y), self.desktop.size, world, target, &views.party, &self.keys.inventory, &self.shortcut, &views.abnormal, killer_ui::xdat_view::MinimapState { town: None, player: world.me.as_ref().map(|me| (me.position.x as i32, me.position.y as i32)), yaw: views.radar.camera_yaw, targets: world.windows.radar.map_points.iter().map(|p| (p[0], p[1])).collect(), party: Vec::new() }, self.zone_tracker.current_id, &self.chat.lists, &self.system_msg.list, self.chat.scroll, &self.chat.input.text, self.html_tables.as_deref().map(|tables| &tables.sysstring), &self.small, self.alpha)
+            {
+                return;
+            }
             match window.id {
                 WindowId::STATUS => {
                     if let Some(me) = world.me.as_ref().filter(|_| self.status_visible) {
@@ -2102,6 +2210,29 @@ impl GameUi {
 
     pub fn sync_windows(&mut self, world: &World, tables: Option<&DatTables>, now: killer_platform::time::Instant) {
         self.tick_chat_limiter(now);
+        self.script_me = world.me.as_ref().map(|me| me.object_id);
+        if let Some(interlude) = self.interlude.as_mut().filter(|interlude| interlude.enabled) {
+            interlude.sync(world);
+            if interlude.runtime.host.tables.is_none()
+                && let Some(tables) = &self.html_tables
+            {
+                interlude.runtime.host.attach_tables(tables.clone());
+            }
+            interlude.runtime.host.inventory_limit = self.keys.inventory.limit;
+            interlude.place_generic(self.desktop.size);
+            let pending = interlude.runtime.drain();
+            for error in interlude.runtime.errors.drain(..) {
+                log::warn!("interface.u: {error}");
+            }
+            let reported = self.script_natives_reported;
+            if interlude.runtime.host.unhandled_natives.len() > reported {
+                for native in &interlude.runtime.host.unhandled_natives[reported..] {
+                    log::info!("interface.u: nativa sem ponte: {native}");
+                }
+                self.script_natives_reported = interlude.runtime.host.unhandled_natives.len();
+            }
+            self.apply_script_events(pending);
+        }
         self.sync_fishing(world, tables);
         if let Some(runtime) = &self.option_game_runtime {
             self.keys.party_looting = runtime.console_looting;
@@ -2117,6 +2248,165 @@ impl GameUi {
         self.keys.recipes.sync(world, tables, &mut self.desktop);
         self.keys.recipes.tree.measure(&self.small);
         self.sync_option_window();
+    }
+
+    pub fn interlude_event(&mut self, event_id: i32, param: &str) {
+        let Some(interlude) = self.interlude.as_mut().filter(|interlude| interlude.enabled) else { return };
+        let pending = interlude.script_event(event_id, param);
+        self.apply_script_events(pending);
+    }
+
+    fn apply_script_events(&mut self, pending: Vec<crate::interlude_script::host_impl::HostEvent>) {
+        use crate::interlude_script::host_impl::HostEvent;
+        for item in pending {
+            match item {
+                HostEvent::ShowWindow(name) => {
+                    if let Some(id) = self.interlude.as_ref().and_then(|interlude| interlude.id_of(&name))
+                        && let Some(window) = self.desktop.window_mut(id)
+                    {
+                        window.visible = true;
+                    }
+                }
+                HostEvent::HideWindow(name) => {
+                    if let Some(id) = self.interlude.as_ref().and_then(|interlude| interlude.id_of(&name))
+                        && let Some(window) = self.desktop.window_mut(id)
+                    {
+                        window.visible = false;
+                    }
+                }
+                HostEvent::Sound(name) => self.keys.push_command(crate::ui_keys::UiCommand::InterfaceSoundNamed(name)),
+                HostEvent::Request(request) => self.apply_script_request(request),
+                _ => {}
+            }
+        }
+    }
+
+    fn apply_script_request(&mut self, request: crate::interlude_script::host_impl::ScriptRequest) {
+        use crate::interlude_script::host_impl::ScriptRequest;
+        use crate::ui_keys::UiCommand;
+        use killer_world::NetCommand;
+        let origin = |loc: crate::interlude_script::Vector| [loc.x as i32, loc.y as i32, loc.z as i32];
+        let command = match request {
+            ScriptRequest::SelfTarget => {
+                if let Some(me) = self.script_me {
+                    self.keys.push_command(UiCommand::ScriptTarget(me));
+                }
+                return;
+            }
+            ScriptRequest::TargetCancel => NetCommand::TargetCancel,
+            ScriptRequest::TargetUser { server_id } => {
+                self.keys.push_command(UiCommand::ScriptTarget(server_id));
+                return;
+            }
+            ScriptRequest::Attack { server_id, loc } => NetCommand::AttackRequest { object_id: server_id, origin: origin(loc), shift: self.keys.shift },
+            ScriptRequest::Action { server_id, loc } => NetCommand::Action { object_id: server_id, origin: origin(loc), shift: self.keys.shift },
+            ScriptRequest::UseItem { server_id } => NetCommand::UseItem { object_id: server_id, ctrl: self.keys.ctrl },
+            ScriptRequest::DestroyItem { server_id, num } => NetCommand::DestroyItem { object_id: server_id, count: num },
+            ScriptRequest::DropItem { server_id, num, loc } => NetCommand::DropItem { object_id: server_id, count: num, position: origin(loc) },
+            ScriptRequest::UnequipItem { slot_bit_type, .. } => NetCommand::Unequip { body_part: slot_bit_type },
+            ScriptRequest::CrystallizeItem { server_id, num } => NetCommand::CrystallizeItem { object_id: server_id, count: num },
+            ScriptRequest::ItemList => NetCommand::RequestItemList,
+            ScriptRequest::SkillList => NetCommand::RequestSkillList,
+            ScriptRequest::QuestList => NetCommand::RequestQuestList,
+            ScriptRequest::DestroyQuest { quest_id } => NetCommand::QuestAbort { quest_id },
+            ScriptRequest::RestartPoint { kind } => NetCommand::RestartPoint { point: kind },
+            ScriptRequest::Exit => {
+                self.warning_exit = true;
+                return;
+            }
+            ScriptRequest::StartTrade { target_id } => NetCommand::Trade { object_id: target_id },
+            ScriptRequest::TradeDone { done } => NetCommand::TradeDone { confirm: done },
+            ScriptRequest::AnswerTrade { ok } => NetCommand::AnswerTrade { accept: ok },
+            ScriptRequest::BuyItems { merchant, items } => NetCommand::BuyItems { list_id: merchant, orders: items },
+            ScriptRequest::BuySeed { merchant, items } => NetCommand::BuySeed { manor_id: merchant, orders: items },
+            ScriptRequest::WarehouseDeposit { items } => NetCommand::WarehouseDeposit { orders: items },
+            ScriptRequest::WarehouseWithdraw { items } => NetCommand::WarehouseWithdraw { orders: items },
+            ScriptRequest::PackageSend { target_id, items } => NetCommand::PackageSend { target_id, orders: items },
+            ScriptRequest::PackageSendableItemList { target_id } => NetCommand::PackageSendableItemList { target_id },
+            ScriptRequest::MultiSellChoose { shop_id, item_id, item_count, .. } => NetCommand::MultiSellChoose { list_id: shop_id, entry_id: item_id, amount: item_count },
+            ScriptRequest::InviteParty { name } => NetCommand::JoinParty { name, item_distribution: self.keys.party_looting },
+            ScriptRequest::PartyLeave => NetCommand::WithdrawParty,
+            ScriptRequest::PartyDismiss { name } => NetCommand::OustPartyMember { name },
+            ScriptRequest::AcquireSkillInfo { id, level, kind } => NetCommand::AcquireSkillInfo { skill_id: id, level, mode: kind },
+            ScriptRequest::AcquireSkill { id, level, kind } => NetCommand::AcquireSkill { skill_id: id, level, mode: kind },
+            ScriptRequest::ExEnchantSkillInfo { id, level } => NetCommand::ExEnchantSkillInfo { skill_id: id, level },
+            ScriptRequest::ExEnchantSkill { id, level } => NetCommand::ExEnchantSkill { skill_id: id, level },
+            ScriptRequest::EnchantItem { server_id } => NetCommand::EnchantItem { object_id: server_id },
+            ScriptRequest::Bypass { command } => NetCommand::Bypass { command },
+            ScriptRequest::LinkHtml { link } => NetCommand::LinkHtml { link },
+            ScriptRequest::BbsBoard => NetCommand::ShowBoard,
+            ScriptRequest::OpenMinimap => NetCommand::ShowMinimap,
+            ScriptRequest::HennaItemList => NetCommand::HennaList,
+            ScriptRequest::HennaItemInfo { henna_id } => NetCommand::HennaItemInfo { symbol_id: henna_id },
+            ScriptRequest::HennaEquip { henna_id } => NetCommand::HennaEquip { symbol_id: henna_id },
+            ScriptRequest::HennaUnequipList => NetCommand::HennaUnequipList,
+            ScriptRequest::HennaUnequipInfo { henna_id } => NetCommand::HennaUnequipInfo { symbol_id: henna_id },
+            ScriptRequest::HennaUnequip { henna_id } => NetCommand::HennaUnequip { symbol_id: henna_id },
+            ScriptRequest::ObserverModeEnd => NetCommand::ObserverEnd,
+            ScriptRequest::PetUseItem { server_id } => NetCommand::PetUseItem { object_id: server_id },
+            ScriptRequest::GiveItemToPet { server_id, num } => NetCommand::GiveItemToPet { object_id: server_id, count: num },
+            ScriptRequest::GetItemFromPet { server_id, num, .. } => NetCommand::GetItemFromPet { object_id: server_id, count: num },
+            ScriptRequest::ChangePetName { name } => NetCommand::ChangePetName { name },
+            ScriptRequest::DeleteMacro { macro_id } => NetCommand::DeleteMacro { id: macro_id },
+            ScriptRequest::Petition { message, kind } => NetCommand::Petition { content: message, kind },
+            ScriptRequest::PetitionCancel => NetCommand::PetitionCancel { content: String::new() },
+            ScriptRequest::GmCommand { param } => NetCommand::BypassBuildCmd { command: param },
+            ScriptRequest::SnoopEnd { snoop_id } => NetCommand::GmSnoopEnd { snoop_id },
+            ScriptRequest::OlympiadMatchList => NetCommand::OlympiadMatchList,
+            ScriptRequest::OlympiadObserverEnd => NetCommand::OlympiadObserverEnd,
+            ScriptRequest::WriteHeroWords { words } => NetCommand::WriteHeroWords { words },
+            ScriptRequest::PartyMatchWaitList { page: _, min_level, max_level: _, room_type } => NetCommand::PartyMatchList { level: min_level, location: 0, mode: room_type },
+            ScriptRequest::JoinPartyRoom { room_number } => NetCommand::JoinPartyRoom { room_id: room_number },
+            ScriptRequest::ManagePartyRoom { room_number, max_members, min_level, max_level, title } => NetCommand::ManagePartyRoom { room_id: room_number, max_members, min_level, max_level, loot_type: self.keys.party_looting, title },
+            ScriptRequest::DismissPartyRoom { room_number } => NetCommand::DismissPartyRoom { room_id: room_number },
+            ScriptRequest::WithdrawPartyRoom { room_number } => NetCommand::WithdrawPartyRoom { room_id: room_number },
+            ScriptRequest::BanFromPartyRoom { member_id } => NetCommand::OustFromPartyRoom { object_id: member_id },
+            ScriptRequest::CommandChannelBanParty { party_master_name } => NetCommand::ExOustFromMpcc { name: party_master_name },
+            ScriptRequest::RecipeBookOpen { kind } => NetCommand::RecipeBookOpen { common: kind != 0 },
+            ScriptRequest::RecipeItemDelete { server_id } => NetCommand::RecipeItemDelete { recipe_id: server_id },
+            ScriptRequest::RecipeItemMakeInfo { server_id } => NetCommand::RecipeItemMakeInfo { recipe_id: server_id },
+            ScriptRequest::RecipeItemMakeSelf { recipe_id } => NetCommand::RecipeItemMakeSelf { recipe_id },
+            ScriptRequest::RecipeShopMakeInfo { server_id, recipe_id } => NetCommand::RecipeShopMakeInfo { manufacturer_id: server_id, recipe_id },
+            ScriptRequest::RecipeShopMakeDo { merchant_id, recipe_id, adena } => NetCommand::RecipeShopMakeDo { manufacturer_id: merchant_id, recipe_id, cost: adena },
+            ScriptRequest::RecipeShopSellList { server_id } => NetCommand::RecipeShopSellList { manufacturer_id: server_id },
+            ScriptRequest::RecipeShopMessageSet { message } => NetCommand::RecipeShopMessageSet { message },
+            ScriptRequest::RecipeShopListSet { items } => NetCommand::RecipeShopListSet { items },
+            ScriptRequest::RecipeShopManageQuit => NetCommand::RecipeShopManageQuit,
+            ScriptRequest::SsqStatus { status_id } => NetCommand::SsqStatus { page: status_id.clamp(0, 255) as u8 },
+            ScriptRequest::CastleSiegeAttackerList { castle_id } => NetCommand::CastleSiegeAttackerList { castle_id },
+            ScriptRequest::CastleSiegeDefenderList { castle_id } => NetCommand::CastleSiegeDefenderList { castle_id },
+            ScriptRequest::JoinCastleSiege { castle_id, is_attacker, is_register } => NetCommand::JoinCastleSiege { castle_id, attacker: is_attacker != 0, join: is_register != 0 },
+            ScriptRequest::ConfirmCastleSiegeWaitingList { castle_id, clan_id, is_register } => NetCommand::ConfirmCastleSiegeWaitingList { castle_id, pledge_id: clan_id, approved: is_register != 0 },
+            ScriptRequest::SetCastleSiegeTime { castle_id, time_id } => NetCommand::SetCastleSiegeTime { castle_id, time: time_id },
+            ScriptRequest::ClanLeave { .. } => NetCommand::WithdrawPledge,
+            ScriptRequest::ClanExpelMember { name, .. } => NetCommand::OustPledgeMember { name },
+            ScriptRequest::ClanAskJoin { id, .. } => NetCommand::JoinPledge { object_id: id },
+            ScriptRequest::ClanChangeNickName { name, nick_name } => NetCommand::GiveNickName { target: name, title: nick_name },
+            ScriptRequest::SellItems { merchant, items } => NetCommand::SellItems {
+                list_id: merchant,
+                orders: items.into_iter().map(|(object_id, item_id, count)| l2_net::game::ItemOrder { object_id, item_id, count }).collect(),
+            },
+            ScriptRequest::ProcureCrop { merchant, items } => NetCommand::ProcureCrop {
+                manor_id: merchant,
+                orders: items.into_iter().map(|(object_id, item_id, count)| l2_net::game::ItemOrder { object_id, item_id, count }).collect(),
+            },
+            ScriptRequest::ProcureCropList { crops } => NetCommand::ProcureCropList {
+                orders: crops.into_iter().map(|(object_id, crop_id, manor_id)| l2_net::game::CropProcure { object_id, crop_id, manor_id, count: 0 }).collect(),
+            },
+            ScriptRequest::ChatLine { message, .. } => {
+                self.keys.push_command(UiCommand::ScriptChat(message));
+                return;
+            }
+            ScriptRequest::Command { command } => {
+                self.keys.push_command(UiCommand::ScriptCommand(command));
+                return;
+            }
+            other => {
+                log::info!("script: pedido sem ponte no app: {other:?}");
+                return;
+            }
+        };
+        self.keys.send(command);
     }
 
     pub fn option_open(&self) -> bool {
@@ -2829,6 +3119,14 @@ impl GameUi {
     }
 
     pub fn mouse_down_at(&mut self, x: i32, y: i32, now: Instant, world: &World) -> bool {
+        if let Some(interlude) = self.interlude.as_mut().filter(|interlude| interlude.enabled)
+            && let Some(index) = interlude.generic_at(x, y)
+        {
+            interlude.mouse_down_generic(index, x, y);
+            let pending = interlude.runtime.drain();
+            self.apply_script_events(pending);
+            return true;
+        }
         self.cursor = (x, y);
         if let Some((lx, ly)) = self.warning_local(x, y) {
             self.warning_pressed = dialog::WarningDialog::hit(lx, ly);
@@ -2919,6 +3217,29 @@ impl GameUi {
         {
             return true;
         }
+        if self.interlude.as_ref().is_some_and(|interlude| interlude.enabled)
+            && crate::ui_interlude::InterludeUi::html_window(id)
+            && let Some(window) = self.desktop.window(id)
+        {
+            let (lx, ly) = (x - window.rect.x, y - window.rect.y);
+            let on_grip = window.grip.contains(lx, ly);
+            if crate::ui_interlude::InterludeUi::html_close_button().contains(lx, ly) {
+                self.close_html_window(id);
+                return true;
+            }
+            let link = self
+                .html_viewer(id)
+                .and_then(|viewer| crate::ui_interlude::InterludeUi::html_link_at(&viewer.doc.body, viewer.scroll, lx, ly, &self.small));
+            if let Some(viewer) = self.html_viewer_slot(id).as_mut() {
+                viewer.pointer = Some((lx, ly));
+            }
+            log::debug!("clique na janela do NPC (Interlude) em ({lx}, {ly}): {link:?}");
+            self.link_pressed = link;
+            if self.link_pressed.is_none() && on_grip {
+                self.desktop.begin_drag(x, y);
+            }
+            return true;
+        }
         if (id == WindowId::NPC_HTML || id == WindowId::ITEM_HTML)
             && let Some(window) = self.desktop.window(id)
             && npc_viewer::close_button().offset(window.rect.x, window.rect.y).contains(x, y)
@@ -2985,6 +3306,40 @@ impl GameUi {
             }
             if self.desktop.window(id).is_some_and(|window| window.visible) {
                 self.desktop.begin_drag(x, y);
+            }
+            return true;
+        }
+        if let Some(window) = self.desktop.window(id).filter(|_| self.interlude.as_ref().is_some_and(|interlude| interlude.enabled && interlude.handles(id))) {
+            let (lx, ly) = (x - window.rect.x, y - window.rect.y);
+            let on_grip = window.grip.contains(lx, ly);
+            let action = self.interlude.as_mut().and_then(|interlude| interlude.mouse_down(id, lx, ly));
+            match action {
+                Some(crate::ui_interlude::Action::Close) => {
+                    self.keys.sound(killer_ui::interface_sound::INVENTORY_CLOSE);
+                    if let Some(window) = self.desktop.window_mut(id) {
+                        window.visible = false;
+                    }
+                    if let Some(interlude) = self.interlude.as_mut()
+                        && let Some(name) = interlude.name_of(id)
+                    {
+                        interlude.runtime.hide(name);
+                        let pending = interlude.runtime.drain();
+                        self.apply_script_events(pending);
+                    }
+                }
+                Some(crate::ui_interlude::Action::Button(button)) => {
+                    let pending = self
+                        .interlude
+                        .as_mut()
+                        .and_then(|interlude| interlude.name_of(id).map(|name| interlude.click(name, &button)))
+                        .unwrap_or_default();
+                    self.apply_script_events(pending);
+                }
+                Some(_) => {}
+                None if on_grip => {
+                    self.desktop.begin_drag(x, y);
+                }
+                None => {}
             }
             return true;
         }
@@ -3313,6 +3668,10 @@ impl GameUi {
 
     pub fn mouse_move(&mut self, x: i32, y: i32) -> bool {
         self.cursor = (x, y);
+        if let Some(interlude) = self.interlude.as_mut().filter(|interlude| interlude.enabled && interlude.generic_drag.is_some()) {
+            interlude.drag_generic(x, y);
+            return true;
+        }
         if let Some(id) = self.status_resize.window() {
             if let Some(window) = self.desktop.window_mut(id) {
                 self.status_resize.drag(window, x, y);
@@ -3466,6 +3825,9 @@ impl GameUi {
     }
 
     pub fn mouse_up_in(&mut self, world: &World) -> Option<String> {
+        if let Some(interlude) = self.interlude.as_mut() {
+            interlude.end_drag_generic();
+        }
         if let Some((id, x, y, now)) = self.deferred_close.take() {
             let (cx, cy) = self.cursor;
             let inside = self.button_map.borrow().iter().any(|(window, button)| *window == id && button.close && button.contains(cx, cy));
@@ -3478,6 +3840,9 @@ impl GameUi {
             }
         }
         self.button_held = None;
+        if let Some(interlude) = self.interlude.as_mut() {
+            interlude.mouse_up();
+        }
         if let Some(pressed) = self.close_pressed.take() {
             let (x, y) = self.cursor;
             if self.button_map.borrow().iter().any(|(id, button)| *id == pressed && button.close && button.contains(x, y)) {
@@ -3867,8 +4232,18 @@ impl GameUi {
         }
         match under {
             Some(id @ (WindowId::NPC_HTML | WindowId::ITEM_HTML)) => {
+                let limit = self
+                    .interlude
+                    .as_ref()
+                    .filter(|interlude| interlude.enabled)
+                    .and_then(|_| self.html_viewer(id))
+                    .map(|viewer| crate::ui_interlude::InterludeUi::html_scroll_limit(&viewer.doc.body, &self.small));
                 if let Some(viewer) = self.html_viewer_slot(id).as_mut() {
-                    viewer.scroll_by((-ticks * HTML_WHEEL_STEP as f32).round() as i32);
+                    let step = (-ticks * HTML_WHEEL_STEP as f32).round() as i32;
+                    match limit {
+                        Some(limit) => viewer.scroll = (viewer.scroll + step).clamp(0, limit),
+                        None => viewer.scroll_by(step),
+                    }
                 }
                 true
             }
@@ -4329,6 +4704,21 @@ pub fn paint_item_label(list: &mut DrawList, item: &ItemLabel, font: &BitmapFont
 
 fn rgb(color: [u8; 3]) -> Argb {
     Argb(0xFF00_0000 | (u32::from(color[0]) << 16) | (u32::from(color[1]) << 8) | u32::from(color[2]))
+}
+
+pub fn load_gfx_fonts(client: &mut Client, localization: &IniFile) -> Result<(BitmapFont, BitmapFont, Vec<killer_ui::gfx_font::GfxAtlas>), Box<dyn std::error::Error + Send + Sync>> {
+    let set = killer_ui::gfx_font::GfxFontSet::from_localization(localization).ok_or_else(|| AssetError::NotFound(format!("{LOCALIZATION_INI}: FontLib e FontMap da língua")))?;
+    let bytes = killer_assets::gfx_lib::read_export(&client.root().join("SysTextures").join("ui.ugx"), set.export_name())?;
+    let swf = l2_dat::swf::Swf::parse(&bytes).map_err(|e| AssetError::Package(format!("{}: {e}", set.library)))?;
+    let fonts = swf.fonts().map_err(|e| AssetError::Package(format!("{}: {e}", set.library)))?;
+    let build = |face: &killer_ui::gfx_font::FontFace, ppem: u32| {
+        let font = killer_ui::gfx_font::select_font(&fonts, face).ok_or_else(|| AssetError::NotFound(format!("{}: fonte {} {}", set.library, face.family, if face.bold { "Bold" } else { "Normal" })))?;
+        let chars = font.codes.iter().filter_map(|code| char::from_u32(u32::from(*code)));
+        killer_ui::gfx_font::build(font, ppem, chars).map_err(|e| AssetError::Package(format!("{}: {e}", set.library)))
+    };
+    let (small, small_atlas) = build(&set.normal, killer_ui::gfx_font::SMALL_PPEM)?;
+    let (large, large_atlas) = build(&set.bold, killer_ui::gfx_font::LARGE_PPEM)?;
+    Ok((small, large, vec![small_atlas, large_atlas]))
 }
 
 pub fn load_named_font(client: &mut Client, texture: &str, file: &str) -> Result<BitmapFont, AssetError> {
@@ -5493,6 +5883,7 @@ pub(crate) mod tests {
             ani_char: String::new(),
             visual_effect: String::new(),
             icon: format!("icon.skill{id:04}"),
+            icon_type: None,
             extra_eff,
             is_ench: 0,
             ench_skill_id: 0,

@@ -251,7 +251,7 @@ mod tests {
         let mut lods = 0;
         for (row, template) in tables.chargrp.iter().enumerate() {
             let player = crate::pawn::Player {
-                template,
+                look: crate::pawn::CharLook::Classic(template),
                 row,
                 face: 0,
                 hair_style: 0,

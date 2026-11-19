@@ -25,6 +25,7 @@ pub mod replay_table;
 pub mod screen_fade;
 pub mod server_objects;
 pub mod session;
+pub mod session_h5;
 pub mod special_camera;
 mod transient_effect_data;
 pub mod state;
@@ -38,10 +39,10 @@ pub use anim::{
 pub use chat::{ChatLine, ChatLog, NOTICE_COLOR, Notice, notice_of};
 pub use clock::GameClock;
 pub use inventory::Inventory;
-pub use net::{NetCommand, NetEvent, NetHandle, PacketRecord, ReplayCommand, ReplayLink, encode, now_seconds, spawn, spawn_choosing, spawn_replay, spawn_tapped};
+pub use net::{NetCommand, NetEvent, NetHandle, PacketRecord, ReplayCommand, ReplayLink, encode, now_seconds, spawn, spawn_choosing, spawn_choosing_for, spawn_replay, spawn_tapped};
 pub use replay::{PlayEvent, ReplayPlayer, RecordStart, Recorder, RecorderNotice, ReplayError, ReplayFile};
 pub use session::{Session, SessionEvent, SessionState};
 pub use state::{CameraCommand, Combat, Dialog, Dialogs, ItemDropKind, Door, Effects, StaticTarget, Gauge, HitEvent, Party, Pet, PledgeRecord, Vehicle};
 pub use world::{
-    Casting, Entity, EntityKind, ItemOrigin, MacroList, Mount, Player, Rotation, Stats, UserSocial, World, WorldEvent,
+    Casting, Entity, EntityKind, ItemOrigin, MacroList, Mount, Player, Rotation, Stats, UserExtras, UserSocial, World, WorldEvent,
 };

@@ -102,6 +102,7 @@ use l2_net::game::{
 use l2_net::login::Authorization;
 use l2_net::wire;
 
+use crate::session_h5::{HighFiveDecoded, decode_world_high_five};
 use crate::world::WorldEvent;
 
 #[derive(Debug)]
@@ -109,6 +110,7 @@ pub enum SessionEvent {
     Characters(Vec<CharSelectEntry>),
     Selected,
     UserInfo(Box<UserInfoHead>),
+    UserInfoHighFive { head: Box<UserInfoHead>, exp_percent: f64, vitality: i32 },
     World(WorldEvent),
     Time(ClientSetTime),
     Refused(String),
@@ -140,18 +142,144 @@ pub struct Session {
     account: String,
     auth: Option<Authorization>,
     state: SessionState,
+    high_five: bool,
 }
 
 impl Session {
     pub fn new(account: String, auth: Authorization) -> Session {
-        Session { account, auth: Some(auth), state: SessionState::AwaitingKey }
+        Session::new_for(l2_dat::Chronicle::C4, account, auth)
+    }
+
+    pub fn new_for(chronicle: l2_dat::Chronicle, account: String, auth: Authorization) -> Session {
+        Session {
+            account,
+            auth: Some(auth),
+            state: SessionState::AwaitingKey,
+            high_five: chronicle == l2_dat::Chronicle::HighFive,
+        }
     }
 
     pub fn replaying() -> Session {
-        Session { account: String::new(), auth: None, state: SessionState::InWorld }
+        Session { account: String::new(), auth: None, state: SessionState::InWorld, high_five: false }
+    }
+
+    pub fn is_high_five(&self) -> bool {
+        self.high_five
+    }
+
+    pub fn opening(&self) -> Vec<u8> {
+        if self.high_five {
+            l2_net::game::high_five::protocol_version(l2_net::game::high_five::PROTOCOL_VERSION)
+        } else {
+            l2_net::game::packets::protocol_version()
+        }
+    }
+
+    pub fn logout_packet(&self) -> Vec<u8> {
+        if self.high_five { l2_net::game::high_five::logout() } else { l2_net::game::packets::logout() }
+    }
+
+    fn on_body_high_five(&mut self, body: &[u8]) -> (Option<SessionEvent>, Vec<Vec<u8>>, Option<GameCrypt>) {
+        use l2_net::game::high_five as hf;
+        use l2_net::game::high_five_world as hw;
+        let opcode = body.first().copied().unwrap_or(0);
+        let malformed = || (Some(SessionEvent::Malformed { opcode, size: body.len() }), Vec::new(), None);
+        match opcode {
+            l2_net::game::OP_KEY_PACKET_HIGH_FIVE => {
+                if hf::key_packet_is_protocol_refusal(body) {
+                    return (Some(SessionEvent::Refused(PROTOCOL_MISMATCH.into())), vec![hf::logout()], None);
+                }
+                match (GameCrypt::from_key_packet_high_five(body), &self.auth) {
+                    (Ok(crypt), Some(auth)) => {
+                        self.state = SessionState::AwaitingCharacters;
+                        (None, vec![hf::auth_login(&self.account, auth, hf::LANGUAGE_ENGLISH)], Some(crypt))
+                    }
+                    (Err(_), _) => (Some(SessionEvent::Refused(format!("pacote {opcode:#04x} malformado"))), Vec::new(), None),
+                    (Ok(_), None) => (Some(SessionEvent::Unknown { opcode, size: body.len() }), Vec::new(), None),
+                }
+            }
+            hf::OP_CHAR_SELECT_INFO => match hf::read_char_select_info(body) {
+                Ok(info) => {
+                    self.state = SessionState::Selecting;
+                    let entries = info.characters.into_iter().map(|character| character.entry).collect();
+                    (Some(SessionEvent::Characters(entries)), Vec::new(), None)
+                }
+                Err(_) => malformed(),
+            },
+            hf::OP_AUTH_LOGIN_FAIL => {
+                (Some(SessionEvent::Refused("game server recusou o AuthLogin".into())), Vec::new(), None)
+            }
+            hf::OP_CHAR_SELECTED => match hf::read_character_selected(body) {
+                Ok(_) => (Some(SessionEvent::Selected), vec![hw::enter_world()], None),
+                Err(_) => malformed(),
+            },
+            hw::OP_RESTART_RESPONSE => match body.get(1..5) {
+                Some(result) => {
+                    self.state = SessionState::AwaitingCharacters;
+                    let result = i32::from_le_bytes([result[0], result[1], result[2], result[3]]);
+                    let response = l2_net::game::packets::RestartResponse { result, message: String::new() };
+                    (Some(SessionEvent::RestartResponse(response)), Vec::new(), None)
+                }
+                None => malformed(),
+            },
+            hw::OP_LEAVE_WORLD => {
+                self.state = SessionState::AwaitingCharacters;
+                (Some(SessionEvent::LeftWorld), Vec::new(), None)
+            }
+            hw::OP_GAME_GUARD_QUERY => match read_game_guard_query(body) {
+                Ok(query) => (Some(SessionEvent::GameGuardQuery(query.keys)), vec![hw::game_guard_reply(query.keys)], None),
+                Err(_) => malformed(),
+            },
+            hf::OP_CHAR_TEMPLATES => match read_char_templates(body) {
+                Ok(templates) => (Some(SessionEvent::CharTemplates(templates)), Vec::new(), None),
+                Err(_) => malformed(),
+            },
+            hf::OP_CHAR_CREATE_OK => match read_char_create_ok(body) {
+                Ok(_) => (Some(SessionEvent::CharCreated), Vec::new(), None),
+                Err(_) => malformed(),
+            },
+            hf::OP_CHAR_CREATE_FAIL => match read_char_create_fail(body) {
+                Ok(fail) => (Some(SessionEvent::CharCreateFailed(fail.reason)), Vec::new(), None),
+                Err(_) => malformed(),
+            },
+            hf::OP_CHAR_DELETE_OK => match read_char_delete_ok(body) {
+                Ok(_) => (Some(SessionEvent::CharDeleted), Vec::new(), None),
+                Err(_) => malformed(),
+            },
+            hf::OP_CHAR_DELETE_FAIL => match read_char_delete_fail(body) {
+                Ok(fail) => (Some(SessionEvent::CharDeleteFailed(fail.reason)), Vec::new(), None),
+                Err(_) => malformed(),
+            },
+            hf::OP_SERVER_CLOSE => (Some(SessionEvent::ServerClosed), Vec::new(), None),
+            _ if matches!(self.state, SessionState::Entering | SessionState::InWorld) => {
+                match decode_world_high_five(body) {
+                    Ok(HighFiveDecoded::UserInfo(head, exp_percent, vitality)) => {
+                        self.state = SessionState::InWorld;
+                        (Some(SessionEvent::UserInfoHighFive { head, exp_percent, vitality }), Vec::new(), None)
+                    }
+                    Ok(HighFiveDecoded::World(event)) => (Some(SessionEvent::World(event)), Vec::new(), None),
+                    Ok(HighFiveDecoded::Discarded(what)) => {
+                        log::debug!("pacote H5 {what} ({opcode:#04x}, {} bytes) lido e descartado", body.len());
+                        (None, Vec::new(), None)
+                    }
+                    Ok(HighFiveDecoded::Unknown) => {
+                        log::info!("opcode H5 {opcode:#04x} sem leitor ({} bytes); início {:02x?}", body.len(), &body[..body.len().min(48)]);
+                        (Some(SessionEvent::Unknown { opcode, size: body.len() }), Vec::new(), None)
+                    }
+                    Err(why) => {
+                        log::warn!("pacote H5 {opcode:#04x} ({} bytes) malformado: {why}; início {:02x?}", body.len(), &body[..body.len().min(64)]);
+                        malformed()
+                    }
+                }
+            }
+            _ => (Some(SessionEvent::Unknown { opcode, size: body.len() }), Vec::new(), None),
+        }
     }
 
     pub fn on_body(&mut self, body: &[u8]) -> (Option<SessionEvent>, Vec<Vec<u8>>, Option<GameCrypt>) {
+        if self.high_five {
+            return self.on_body_high_five(body);
+        }
         let opcode = match body.first() {
             Some(op) => *op,
             None => return (Some(SessionEvent::Unknown { opcode: 0, size: 0 }), Vec::new(), None),
@@ -255,11 +383,17 @@ impl Session {
 
     pub fn select(&mut self, slot: i32) -> Vec<u8> {
         self.state = SessionState::Entering;
+        if self.high_five {
+            return l2_net::game::high_five::character_selected(slot);
+        }
         character_selected(slot)
     }
 
     pub fn select_transfer(&mut self, slot: i32, position: [i32; 3]) -> Vec<u8> {
         self.state = SessionState::Entering;
+        if self.high_five {
+            return l2_net::game::high_five::character_selected(slot);
+        }
         character_selected_transfer(slot, true, position)
     }
 
@@ -1232,4 +1366,236 @@ mod tests {
         assert!(matches!(decode_world(&[0x0f, 1, 0, 0, 0]), Some(Err(_))));
         assert!(matches!(decode_world(&[0x25, 0]), Some(Ok(WorldEvent::ActionFailed(_)))));
     }
+
+    fn high_five_auth() -> Authorization {
+        Authorization {
+            login_key: [1, 2],
+            play_key: [3, 4],
+            server: GameServer { id: 1, ip: [127, 0, 0, 1], port: 7777, players: 0, max_players: 0, online: true, extra: Default::default() },
+        }
+    }
+
+    fn high_five_key_packet() -> Vec<u8> {
+        let mut body = vec![0x2e, 1, 1, 2, 3, 4, 5, 6, 7, 8];
+        body.extend_from_slice(&[1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0]);
+        body
+    }
+
+    fn high_five_character(name: &str) -> Vec<u8> {
+        let mut w = Writer::new();
+        w.write_s(name);
+        w.write_d(7);
+        w.write_s("conta");
+        for v in [1, 0, 0, 0, 3, 1, 1, 10, 20, 30] {
+            w.write_d(v);
+        }
+        w.write_f(10.0);
+        w.write_f(5.0);
+        w.write_d(0);
+        w.write_q(1 << 33);
+        w.write_f(12.5);
+        for v in [10, 0, 0, 0] {
+            w.write_d(v);
+        }
+        for _ in 0..7 + 26 {
+            w.write_d(0);
+        }
+        for v in [0, 0, 0] {
+            w.write_d(v);
+        }
+        w.write_f(10.0);
+        w.write_f(5.0);
+        for v in [0, 1, 1] {
+            w.write_d(v);
+        }
+        w.write_c(0);
+        w.write_d(0);
+        w.write_d(0);
+        for _ in 0..4 {
+            w.write_d(0);
+        }
+        w.write_f(0.0);
+        w.write_f(0.0);
+        w.write_d(0);
+        w.into_bytes()
+    }
+
+    #[test]
+    fn high_five_session_opens_with_0e_authorises_with_2b_and_lists_characters() {
+        let mut s = Session::new_for(l2_dat::Chronicle::HighFive, "conta".into(), high_five_auth());
+        assert_eq!(s.opening(), l2_net::game::high_five::protocol_version(273));
+        assert_eq!(s.logout_packet(), vec![0]);
+        let (ev, out, crypt) = s.on_body(&high_five_key_packet());
+        assert!(ev.is_none() && crypt.is_some());
+        assert_eq!(out, vec![l2_net::game::high_five::auth_login("conta", &high_five_auth(), 1)]);
+        assert_eq!(s.state(), SessionState::AwaitingCharacters);
+        let mut list = Writer::new();
+        list.write_c(0x09);
+        list.write_d(1);
+        list.write_d(7);
+        list.write_c(0);
+        list.write_b(&high_five_character("Luz"));
+        let (ev, out, _) = s.on_body(&list.into_bytes());
+        match ev {
+            Some(SessionEvent::Characters(characters)) => {
+                assert_eq!(characters.len(), 1);
+                assert_eq!(characters[0].name, "Luz");
+                assert_eq!(characters[0].exp, 1 << 33);
+            }
+            other => panic!("esperava Characters, veio {other:?}"),
+        }
+        assert!(out.is_empty());
+        assert_eq!(s.state(), SessionState::Selecting);
+        assert_eq!(s.select(2), l2_net::game::high_five::character_selected(2));
+        assert_eq!(s.state(), SessionState::Entering);
+    }
+
+    #[test]
+    fn high_five_session_reports_refusals_and_lobby_answers() {
+        let mut s = Session::new_for(l2_dat::Chronicle::HighFive, "conta".into(), high_five_auth());
+        let mut refused = vec![0x2e, 0];
+        refused.extend_from_slice(&[0; 21]);
+        let (ev, out, crypt) = s.on_body(&refused);
+        assert!(matches!(ev, Some(SessionEvent::Refused(ref text)) if text == PROTOCOL_MISMATCH) && crypt.is_none());
+        assert_eq!(out, vec![vec![0]]);
+        let (ev, _, _) = s.on_body(&[0x0a, 1, 0, 0, 0]);
+        assert!(matches!(ev, Some(SessionEvent::Refused(_))));
+        let (ev, _, _) = s.on_body(&[0x0f, 1, 0, 0, 0]);
+        assert!(matches!(ev, Some(SessionEvent::CharCreated)));
+        let (ev, _, _) = s.on_body(&[0x10, 2, 0, 0, 0]);
+        assert!(matches!(ev, Some(SessionEvent::CharCreateFailed(2))));
+        let (ev, _, _) = s.on_body(&[0x1d]);
+        assert!(matches!(ev, Some(SessionEvent::CharDeleted)));
+        let (ev, _, _) = s.on_body(&[0x1e, 3, 0, 0, 0]);
+        assert!(matches!(ev, Some(SessionEvent::CharDeleteFailed(3))));
+        let (ev, _, _) = s.on_body(&[0x13]);
+        assert!(matches!(ev, Some(SessionEvent::Unknown { opcode: 0x13, .. })));
+        let (ev, _, _) = s.on_body(&[0x09, 1]);
+        assert!(matches!(ev, Some(SessionEvent::Malformed { opcode: 0x09, .. })));
+    }
+
+    fn high_five_selected_body() -> Vec<u8> {
+        let mut w = Writer::new();
+        w.write_c(0x0b);
+        w.write_s("Luz");
+        w.write_d(5);
+        w.write_s("");
+        for v in [0x1234, 0, 0, 1, 3, 4, 1, 10, 20, 30] {
+            w.write_d(v);
+        }
+        w.write_f(100.0);
+        w.write_f(50.0);
+        w.write_d(0);
+        w.write_q(1 << 33);
+        for v in [20, 0, 0, 10, 11, 12, 13, 14, 15, 600, 0, 4] {
+            w.write_d(v);
+        }
+        w.write_b(&[0; 80]);
+        w.write_d(0);
+        w.into_bytes()
+    }
+
+    fn high_five_user_info_body(object_id: i32) -> Vec<u8> {
+        let mut body = vec![0u8; 712];
+        body[0] = 0x32;
+        body[17..21].copy_from_slice(&object_id.to_le_bytes());
+        body
+    }
+
+    fn high_five_entered_session() -> Session {
+        let mut s = Session::new_for(l2_dat::Chronicle::HighFive, "conta".into(), high_five_auth());
+        s.on_body(&high_five_key_packet());
+        let mut list = Writer::new();
+        list.write_c(0x09);
+        list.write_d(1);
+        list.write_d(7);
+        list.write_c(0);
+        list.write_b(&high_five_character("Luz"));
+        s.on_body(&list.into_bytes());
+        s.select(0);
+        s
+    }
+
+    #[test]
+    fn high_five_session_enters_the_world_and_decodes_the_first_packets_of_the_oracle_sequence() {
+        let mut s = high_five_entered_session();
+        let (ev, out, _) = s.on_body(&high_five_selected_body());
+        assert!(matches!(ev, Some(SessionEvent::Selected)));
+        assert_eq!(out, vec![vec![0x11]]);
+        assert_eq!(s.state(), SessionState::Entering);
+
+        let (ev, out, _) = s.on_body(&high_five_user_info_body(268_480_001));
+        match ev {
+            Some(SessionEvent::UserInfoHighFive { head, .. }) => assert_eq!(head.object_id, 268_480_001),
+            other => panic!("esperava UserInfoHighFive, veio {other:?}"),
+        }
+        assert!(out.is_empty());
+        assert_eq!(s.state(), SessionState::InWorld);
+
+        let mut items = Writer::new();
+        items.write_c(0x11);
+        items.write_h(0);
+        items.write_h(0);
+        items.write_h(0);
+        let (ev, _, _) = s.on_body(&items.into_bytes());
+        assert!(matches!(ev, Some(SessionEvent::World(WorldEvent::ItemList(_)))));
+
+        let mut actions = Writer::new();
+        actions.write_c(0xfe);
+        actions.write_h(0x5f);
+        actions.write_d(2);
+        actions.write_d(0);
+        actions.write_d(1);
+        let (ev, out, _) = s.on_body(&actions.into_bytes());
+        assert!(ev.is_none() && out.is_empty());
+
+        let mut storage = Writer::new();
+        storage.write_c(0xfe);
+        storage.write_h(0x2f);
+        for v in 1..=9 {
+            storage.write_d(v);
+        }
+        let (ev, _, _) = s.on_body(&storage.into_bytes());
+        assert!(matches!(ev, Some(SessionEvent::World(WorldEvent::StorageMaxCount(_)))));
+
+        let (ev, _, _) = s.on_body(&[0x1f]);
+        assert!(matches!(ev, Some(SessionEvent::World(WorldEvent::ActionFailed(_)))));
+        let (ev, _, _) = s.on_body(&[0x00, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        assert!(matches!(ev, Some(SessionEvent::World(WorldEvent::Die(_)))));
+
+        let (ev, out, _) = s.on_body(&[0x7e, 1, 2, 3]);
+        assert!(matches!(ev, Some(SessionEvent::Unknown { opcode: 0x7e, size: 4 })) && out.is_empty());
+        let (ev, _, _) = s.on_body(&[0x32, 1]);
+        assert!(matches!(ev, Some(SessionEvent::Malformed { opcode: 0x32, size: 2 })));
+        assert_eq!(s.state(), SessionState::InWorld);
+    }
+
+    #[test]
+    fn high_five_session_answers_game_guard_and_restart_and_leaves_the_world() {
+        let mut s = high_five_entered_session();
+        s.on_body(&high_five_selected_body());
+        s.on_body(&high_five_user_info_body(1));
+        let mut query = Writer::new();
+        query.write_c(0x74);
+        for v in [1, 2, 3, 4] {
+            query.write_d(v);
+        }
+        let (ev, out, _) = s.on_body(&query.into_bytes());
+        assert!(matches!(ev, Some(SessionEvent::GameGuardQuery([1, 2, 3, 4]))));
+        assert_eq!(out, vec![l2_net::game::high_five_world::game_guard_reply([1, 2, 3, 4])]);
+        let (ev, _, _) = s.on_body(&[0x71, 1, 0, 0, 0]);
+        match ev {
+            Some(SessionEvent::RestartResponse(response)) => assert_eq!(response.result, 1),
+            other => panic!("esperava RestartResponse, veio {other:?}"),
+        }
+        assert_eq!(s.state(), SessionState::AwaitingCharacters);
+        let (ev, _, _) = s.on_body(&[0x1f]);
+        assert!(matches!(ev, Some(SessionEvent::Unknown { opcode: 0x1f, .. })));
+        let mut s = high_five_entered_session();
+        s.on_body(&high_five_selected_body());
+        let (ev, _, _) = s.on_body(&[0x84]);
+        assert!(matches!(ev, Some(SessionEvent::LeftWorld)));
+        assert_eq!(s.state(), SessionState::AwaitingCharacters);
+    }
 }
+

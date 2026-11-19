@@ -45,7 +45,7 @@ use l2_net::game::packets::{
 use l2_net::game::packets::{
     NewCharacter, action, answer_trade_request, appearing, attack_request, cannot_move_anymore,
     cannot_move_anymore_in_vehicle, character_create, character_delete, character_restore, dlg_answer, finish_rotating,
-    game_guard_reply, logout, move_backward_to_location, new_character, protocol_version, request_acquire_skill,
+    game_guard_reply, move_backward_to_location, new_character, request_acquire_skill,
     request_acquire_skill_info, request_action_use, request_answer_join_ally, request_answer_join_party,
     request_answer_join_pledge, request_auto_soul_shot, request_block, request_bypass_to_server,
     request_change_move_type, request_change_party_leader, request_change_pet_name, request_change_wait_type,
@@ -56,7 +56,7 @@ use l2_net::game::packets::{
     request_unequip_item, request_withdrawal_party, net_ping, revive_reply, say2, send_time_check, start_rotating, use_item, validate_position, validate_position_in_vehicle,
 };
 use l2_net::login::GameServer;
-use l2_net::transport::{GameConnection, authenticate_choosing};
+use l2_net::transport::{GameConnection, authenticate_choosing_for};
 
 use crate::session::{Session, SessionEvent};
 use l2_net::game::packets::{request_get_off_vehicle, request_get_on_vehicle, request_move_to_location_in_vehicle};
@@ -125,6 +125,8 @@ pub enum NetCommand {
     DlgAnswer { message_id: i32, answer: i32 },
     Reload,
     ChangePartyLeader { name: String },
+    PartyLootModification { loot_type: i32 },
+    AnswerPartyLootModification { accept: bool },
     AutoSoulShot { item_id: i32, enable: bool },
     CharacterCreate(Box<NewCharacter>),
     CharacterDelete { slot: i32 },
@@ -205,6 +207,7 @@ pub enum NetCommand {
     RequestSiegeInfo,
     StartPledgeWar { pledge_name: String },
     StopPledgeWar { pledge_name: String },
+    SurrenderPledgeWar { pledge_name: String },
     Petition { content: String, kind: i32 },
     PetitionCancel { content: String },
     PetitionVote { first: i32, index: i32, text: String },
@@ -256,6 +259,203 @@ pub enum NetCommand {
     ChooseServer(u8),
     NoticeAnswer(bool),
     CardAnswer(i32),
+}
+
+pub fn encode_for(chronicle: l2_dat::Chronicle, command: &NetCommand) -> Option<Vec<u8>> {
+    if chronicle != l2_dat::Chronicle::HighFive {
+        return encode(command);
+    }
+    use l2_net::game::{high_five, high_five_world as hw};
+    match command {
+        NetCommand::CharacterCreate(character) => Some(high_five::character_create(character)),
+        NetCommand::CharacterDelete { slot } => Some(high_five::character_delete(*slot)),
+        NetCommand::NewCharacter => Some(high_five::new_character()),
+        NetCommand::CharacterRestore { slot } => Some(high_five::character_restore(*slot)),
+        NetCommand::Restart => Some(hw::request_restart()),
+        NetCommand::MoveTo { target, origin } => Some(hw::move_backward_to_location(*target, *origin)),
+        NetCommand::Validate { position, heading } => Some(hw::validate_position(*position, *heading, 0)),
+        NetCommand::ValidateInVehicle { vehicle_id, position, heading } => {
+            Some(hw::validate_position(*position, *heading, *vehicle_id))
+        }
+        NetCommand::Say { text, kind, target } => Some(hw::say2(text, *kind, target)),
+        NetCommand::Action { object_id, origin, shift } => Some(hw::action(*object_id, *origin, *shift)),
+        NetCommand::AttackRequest { object_id, origin, shift } => Some(hw::attack_request(*object_id, *origin, *shift)),
+        NetCommand::Appearing => Some(hw::appearing()),
+        NetCommand::RequestItemList => Some(hw::request_item_list()),
+        NetCommand::UseItem { object_id, ctrl } => Some(hw::use_item(*object_id, *ctrl)),
+        NetCommand::Unequip { body_part } => Some(hw::request_unequip_item(*body_part)),
+        NetCommand::Bypass { command } => Some(hw::request_bypass_to_server(command)),
+        NetCommand::LinkHtml { link } => Some(hw::request_link_html(link)),
+        NetCommand::UseSkill { skill_id, ctrl, shift } => Some(hw::request_magic_skill_use(*skill_id, *ctrl, *shift)),
+        NetCommand::UseAction { id, ctrl, shift } => Some(hw::request_action_use(*id, *ctrl, *shift)),
+        NetCommand::ChangeWaitType { .. } => Some(hw::request_action_use(hw::ACTION_SIT_STAND, false, false)),
+        NetCommand::ChangeMoveType { .. } => Some(hw::request_action_use(hw::ACTION_WALK_RUN, false, false)),
+        NetCommand::ShortcutReg { kind, slot, id, character_type } => {
+            Some(hw::request_shortcut_reg(*kind, *slot, *id, *character_type))
+        }
+        NetCommand::ShortcutDel { slot } => Some(hw::request_shortcut_del(*slot)),
+        NetCommand::DestroyItem { object_id, count } => Some(hw::request_destroy_item(*object_id, i64::from(*count))),
+        NetCommand::DropItem { object_id, count, position } => {
+            Some(hw::request_drop_item(*object_id, i64::from(*count), *position))
+        }
+        NetCommand::TargetCancel => Some(hw::request_target_cancel(0)),
+        NetCommand::TargetUnselect => Some(hw::request_target_cancel(1)),
+        NetCommand::RequestSkillCoolTime => Some(hw::request_skill_cool_time()),
+        NetCommand::RequestSkillList => Some(hw::request_skill_list()),
+        NetCommand::RequestQuestList => Some(hw::request_quest_list()),
+        NetCommand::CannotMoveAnymore { position, heading } => Some(hw::cannot_move_anymore(*position, *heading)),
+        NetCommand::GameGuardReply { keys } => Some(hw::game_guard_reply(*keys)),
+        NetCommand::ManorList => Some(hw::request_manor_list()),
+        NetCommand::WriteHeroWords { words } => Some(hw::request_write_hero_words(words)),
+        NetCommand::ExAskJoinMpcc { name } => Some(hw::request_ex_ask_join_mpcc(name)),
+        NetCommand::ExAcceptJoinMpcc { accept } => Some(hw::request_ex_accept_join_mpcc(*accept)),
+        NetCommand::ExOustFromMpcc { name } => Some(hw::request_ex_oust_from_mpcc(name)),
+        NetCommand::AutoSoulShot { item_id, enable } => Some(hw::request_auto_soul_shot(*item_id, *enable)),
+        NetCommand::ExEnchantSkillInfo { skill_id, level } => Some(hw::request_ex_enchant_skill_info(*skill_id, *level)),
+        NetCommand::ExEnchantSkill { skill_id, level } => Some(hw::request_ex_enchant_skill(*skill_id, *level)),
+        NetCommand::ExPledgeCrestLarge { crest_id } => Some(hw::request_ex_pledge_crest_large(*crest_id)),
+        NetCommand::ExSetPledgeCrestLarge { data } => Some(hw::request_ex_set_pledge_crest_large(data)),
+        NetCommand::OlympiadObserverEnd => Some(hw::request_olympiad_observer_end()),
+        NetCommand::SellItems { list_id, orders } => Some(hw::request_sell_item(*list_id, orders)),
+        NetCommand::BuyItems { list_id, orders } => Some(hw::request_buy_item(*list_id, orders)),
+        NetCommand::Trade { object_id } => Some(hw::request_trade(*object_id)),
+        NetCommand::AnswerTrade { accept } => Some(hw::answer_trade_request(*accept)),
+        NetCommand::AddTradeItem { object_id, count, .. } => Some(hw::add_trade_item(*object_id, i64::from(*count))),
+        NetCommand::TradeDone { confirm } => Some(hw::request_trade_done(*confirm)),
+        NetCommand::JoinParty { name, item_distribution } => Some(hw::request_join_party(name, *item_distribution)),
+        NetCommand::AnswerJoinParty { accept } => Some(hw::request_answer_join_party(*accept)),
+        NetCommand::WithdrawParty => Some(hw::request_withdrawal_party()),
+        NetCommand::OustPartyMember { name } => Some(hw::request_oust_party_member(name)),
+        NetCommand::JoinPledge { object_id } => Some(hw::request_join_pledge(*object_id)),
+        NetCommand::AnswerJoinPledge { accept } => Some(hw::request_answer_join_pledge(*accept)),
+        NetCommand::WithdrawPledge => Some(hw::request_withdrawal_pledge()),
+        NetCommand::OustPledgeMember { name } => Some(hw::request_oust_pledge_member(name)),
+        NetCommand::SetPledgeCrest { data } => Some(hw::request_set_pledge_crest(data)),
+        NetCommand::SetAllyCrest { data } => Some(hw::request_set_ally_crest(data)),
+        NetCommand::RequestPledgeCrest { crest_id } => Some(hw::request_pledge_crest(*crest_id)),
+        NetCommand::RequestAllyCrest { crest_id } => Some(hw::request_ally_crest(*crest_id)),
+        NetCommand::RequestPledgeMemberList => Some(hw::request_pledge_member_list()),
+        NetCommand::RequestPledgeInfo { pledge_id } => Some(hw::request_pledge_info(*pledge_id)),
+        NetCommand::JoinAlly { object_id } => Some(hw::request_join_ally(*object_id)),
+        NetCommand::AnswerJoinAlly { accept } => Some(hw::request_answer_join_ally(*accept)),
+        NetCommand::AllyLeave => Some(hw::ally_leave()),
+        NetCommand::AllyDismiss { pledge_name } => Some(hw::ally_dismiss(pledge_name)),
+        NetCommand::DismissAlly => Some(hw::request_dismiss_ally()),
+        NetCommand::RequestAllyInfo => Some(hw::request_ally_info()),
+        NetCommand::FriendInvite { name } => Some(hw::request_friend_invite(name)),
+        NetCommand::AnswerFriendInvite { accept } => Some(hw::request_answer_friend_invite(*accept)),
+        NetCommand::FriendList => Some(hw::request_friend_list()),
+        NetCommand::FriendDel { name } => Some(hw::request_friend_delete(name)),
+        NetCommand::SendFriendMsg { message, receiver } => Some(hw::request_send_friend_message(message, receiver)),
+        NetCommand::StartPledgeWar { pledge_name } => Some(hw::request_start_pledge_war(pledge_name)),
+        NetCommand::StopPledgeWar { pledge_name } => Some(hw::request_stop_pledge_war(pledge_name)),
+        NetCommand::SurrenderPledgeWar { pledge_name } => Some(hw::request_surrender_pledge_war(pledge_name)),
+        NetCommand::QuestAbort { quest_id } => Some(hw::request_quest_abort(*quest_id)),
+        NetCommand::NetPing { .. } => Some(hw::request_net_ping()),
+        NetCommand::ChangePartyLeader { name } => Some(hw::request_change_party_leader(name)),
+        NetCommand::PartyLootModification { loot_type } => Some(hw::request_party_loot_modification(*loot_type)),
+        NetCommand::AnswerPartyLootModification { accept } => Some(hw::answer_party_loot_modification(*accept)),
+        NetCommand::GmCommand { name, kind } => Some(hw::request_gm_command(name, *kind)),
+        NetCommand::UserCommand { command } => Some(hw::request_user_command(*command)),
+        NetCommand::RequestGmList => Some(hw::request_gm_list()),
+        NetCommand::GmSnoopEnd { snoop_id } => Some(hw::request_gm_snoop_end(*snoop_id)),
+        NetCommand::BypassBuildCmd { command } => Some(hw::send_bypass_build_cmd(command)),
+        NetCommand::RestartPoint { point } => Some(hw::request_restart_point(*point)),
+        NetCommand::DlgAnswer { message_id, answer } => Some(hw::dlg_answer(*message_id, *answer, 0)),
+        NetCommand::SocialAction { action } => Some(hw::request_social_action(*action)),
+        NetCommand::ShowMinimap => Some(hw::request_show_minimap()),
+        NetCommand::StartRotating { degree, side } => Some(hw::start_rotating(*degree, *side)),
+        NetCommand::FinishRotating { degree, .. } => Some(hw::finish_rotating(*degree)),
+        NetCommand::SendTimeCheck { first, second } => Some(hw::send_time_check(*first, *second)),
+        NetCommand::RequestRemainTime => Some(hw::request_remain_time()),
+        NetCommand::DismissParty => Some(hw::request_dismiss_party()),
+        NetCommand::CannotMoveAnymoreInVehicle { vehicle_id, position, heading } => {
+            Some(hw::cannot_move_anymore_in_vehicle(*vehicle_id, *position, *heading))
+        }
+        NetCommand::GetOnVehicle { vehicle_id, position } => Some(hw::request_get_on_vehicle(*vehicle_id, *position)),
+        NetCommand::GetOffVehicle { vehicle_id, position } => Some(hw::request_get_off_vehicle(*vehicle_id, *position)),
+        NetCommand::MoveToInVehicle { vehicle_id, local_target, local_origin } => {
+            Some(hw::request_move_to_in_vehicle(*vehicle_id, *local_target, *local_origin))
+        }
+        NetCommand::GiveNickName { target, title } => Some(hw::request_give_nick_name(target, title)),
+        NetCommand::Block { kind, name } => Some(hw::request_block(*kind, name)),
+        NetCommand::MakeMacro(entry) => Some(hw::request_make_macro(entry)),
+        NetCommand::DeleteMacro { id } => Some(hw::request_delete_macro(*id)),
+        NetCommand::RequestMagicSkillList { first, second, third } => {
+            Some(hw::request_magic_skill_list(*first, *second, *third))
+        }
+        NetCommand::AcquireSkill { skill_id, level, mode } => Some(hw::request_acquire_skill(*skill_id, *level, *mode)),
+        NetCommand::AcquireSkillInfo { skill_id, level, mode } => {
+            Some(hw::request_acquire_skill_info(*skill_id, *level, *mode))
+        }
+        NetCommand::WarehouseDeposit { orders } => Some(hw::send_warehouse_deposit_list(orders)),
+        NetCommand::WarehouseWithdraw { orders } => Some(hw::send_warehouse_withdraw_list(orders)),
+        NetCommand::PackageSendableItemList { target_id } => Some(hw::request_package_sendable_item_list(*target_id)),
+        NetCommand::PackageSend { target_id, orders } => Some(hw::request_package_send(*target_id, orders)),
+        NetCommand::CrystallizeItem { object_id, count } => Some(hw::request_crystallize_item(*object_id, *count)),
+        NetCommand::EnchantItem { object_id } => Some(hw::request_enchant_item(*object_id, 0)),
+        NetCommand::PreviewItem { header, list_id, items } => Some(hw::request_preview_item(*header, *list_id, items)),
+        NetCommand::MultiSellChoose { list_id, entry_id, amount } => {
+            Some(hw::multi_sell_choose(*list_id, *entry_id, *amount))
+        }
+        NetCommand::PrivateStoreManageSell => Some(hw::request_private_store_manage_sell()),
+        NetCommand::PrivateStoreManageBuy => Some(hw::request_private_store_manage_buy()),
+        NetCommand::PrivateStoreQuitSell => Some(hw::request_private_store_quit_sell()),
+        NetCommand::PrivateStoreQuitBuy => Some(hw::request_private_store_quit_buy()),
+        NetCommand::SetPrivateStoreMsgSell { message } => Some(hw::set_private_store_msg_sell(message)),
+        NetCommand::SetPrivateStoreMsgBuy { message } => Some(hw::set_private_store_msg_buy(message)),
+        NetCommand::SetPrivateStoreListSell { package_sale, offers } => {
+            Some(hw::set_private_store_list_sell(*package_sale, offers))
+        }
+        NetCommand::SetPrivateStoreListBuy { offers } => Some(hw::set_private_store_list_buy(offers)),
+        NetCommand::PrivateStoreBuy { store_id, orders } => Some(hw::request_private_store_buy(*store_id, orders)),
+        NetCommand::PrivateStoreSell { store_id, items } => Some(hw::request_private_store_sell(*store_id, items)),
+        NetCommand::RecipeBookOpen { common } => Some(hw::request_recipe_book_open(*common)),
+        NetCommand::RecipeItemDelete { recipe_id } => Some(hw::request_recipe_item_delete(*recipe_id)),
+        NetCommand::RecipeItemMakeInfo { recipe_id } => Some(hw::request_recipe_item_make_info(*recipe_id)),
+        NetCommand::RecipeItemMakeSelf { recipe_id } => Some(hw::request_recipe_item_make_self(*recipe_id)),
+        NetCommand::RecipeShopManageList => Some(hw::request_recipe_shop_manage_list()),
+        NetCommand::RecipeShopManageQuit => Some(hw::request_recipe_shop_manage_quit()),
+        NetCommand::RecipeShopManageCancel => Some(hw::request_recipe_shop_manage_cancel()),
+        NetCommand::RecipeShopMessageSet { message } => Some(hw::request_recipe_shop_message_set(message)),
+        NetCommand::RecipeShopListSet { items } => Some(hw::request_recipe_shop_list_set(items)),
+        NetCommand::RecipeShopMakeInfo { manufacturer_id, recipe_id } => {
+            Some(hw::request_recipe_shop_make_info(*manufacturer_id, *recipe_id))
+        }
+        NetCommand::RecipeShopMakeDo { manufacturer_id, recipe_id, .. } => {
+            Some(hw::request_recipe_shop_make_do(*manufacturer_id, *recipe_id))
+        }
+        NetCommand::RecipeShopSellList { .. } => Some(hw::request_recipe_shop_sell_list()),
+        NetCommand::HennaList => Some(hw::request_henna_list()),
+        NetCommand::HennaItemInfo { symbol_id } => Some(hw::request_henna_item_info(*symbol_id)),
+        NetCommand::HennaEquip { symbol_id } => Some(hw::request_henna_equip(*symbol_id)),
+        NetCommand::HennaUnequipList => Some(hw::request_henna_unequip_list()),
+        NetCommand::HennaUnequipInfo { symbol_id } => Some(hw::request_henna_unequip_info(*symbol_id)),
+        NetCommand::HennaUnequip { symbol_id } => Some(hw::request_henna_unequip(*symbol_id)),
+        NetCommand::ChangePetName { name } => Some(hw::request_change_pet_name(name)),
+        NetCommand::PetUseItem { object_id } => Some(hw::request_pet_use_item(*object_id)),
+        NetCommand::PetGetItem { object_id } => Some(hw::request_pet_get_item(*object_id)),
+        NetCommand::GiveItemToPet { object_id, count } => Some(hw::request_give_item_to_pet(*object_id, *count)),
+        NetCommand::GetItemFromPet { object_id, count } => Some(hw::request_get_item_from_pet(*object_id, *count)),
+        NetCommand::BuySeed { manor_id, orders } => Some(hw::request_buy_seed(*manor_id, orders)),
+        NetCommand::SetSeed { manor_id, seeds } => Some(hw::request_set_seed(*manor_id, seeds)),
+        NetCommand::SetCrop { manor_id, crops } => Some(hw::request_set_crop(*manor_id, crops)),
+        NetCommand::ProcureCropList { orders } => Some(hw::request_procure_crop_list(orders)),
+        NetCommand::Raw(body) => Some(body.clone()),
+        NetCommand::Select(_)
+        | NetCommand::SelectTransfer { .. }
+        | NetCommand::Logout
+        | NetCommand::Shutdown
+        | NetCommand::ChooseServer(_)
+        | NetCommand::NoticeAnswer(_)
+        | NetCommand::CardAnswer(_) => None,
+        other => {
+            let debug = format!("{other:?}");
+            let name = debug.split([' ', '(', '{']).next().unwrap_or("desconhecido");
+            log::warn!("H5: comando {name} sem emissor portado; nada foi enviado ao servidor");
+            None
+        }
+    }
 }
 
 pub fn encode(command: &NetCommand) -> Option<Vec<u8>> {
@@ -477,7 +677,7 @@ pub fn encode(command: &NetCommand) -> Option<Vec<u8>> {
         NetCommand::ExPledgeCrestLarge { crest_id } => Some(request_ex_pledge_crest_large(*crest_id)),
         NetCommand::ExSetPledgeCrestLarge { data } => Some(request_ex_set_pledge_crest_large(data)),
         NetCommand::Raw(body) => Some(body.clone()),
-        NetCommand::Select(_) | NetCommand::SelectTransfer { .. } | NetCommand::Logout | NetCommand::Shutdown | NetCommand::ChooseServer(_) | NetCommand::NoticeAnswer(_) | NetCommand::CardAnswer(_) => None,
+        NetCommand::Select(_) | NetCommand::SelectTransfer { .. } | NetCommand::Logout | NetCommand::Shutdown | NetCommand::ChooseServer(_) | NetCommand::NoticeAnswer(_) | NetCommand::CardAnswer(_) | NetCommand::SurrenderPledgeWar { .. } | NetCommand::PartyLootModification { .. } | NetCommand::AnswerPartyLootModification { .. } => None,
     }
 }
 
@@ -543,14 +743,33 @@ pub fn spawn(host: String, port: u16, account: String, password: String) -> NetH
 }
 
 pub fn spawn_choosing(host: String, port: u16, account: String, password: String, choosing: bool) -> NetHandle {
-    spawn_inner(host, port, account, password, choosing, false)
+    spawn_choosing_for(l2_dat::Chronicle::C4, host, port, account, password, choosing)
+}
+
+pub fn spawn_choosing_for(
+    chronicle: l2_dat::Chronicle,
+    host: String,
+    port: u16,
+    account: String,
+    password: String,
+    choosing: bool,
+) -> NetHandle {
+    spawn_inner(chronicle, host, port, account, password, choosing, false)
 }
 
 pub fn spawn_tapped(host: String, port: u16, account: String, password: String) -> NetHandle {
-    spawn_inner(host, port, account, password, true, true)
+    spawn_inner(l2_dat::Chronicle::C4, host, port, account, password, true, true)
 }
 
-fn spawn_inner(host: String, port: u16, account: String, mut password: String, choosing: bool, tapped: bool) -> NetHandle {
+fn spawn_inner(
+    chronicle: l2_dat::Chronicle,
+    host: String,
+    port: u16,
+    account: String,
+    mut password: String,
+    choosing: bool,
+    tapped: bool,
+) -> NetHandle {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let (ev_tx, ev_rx) = mpsc::channel();
     let (tap_tx, tap_rx) = mpsc::channel();
@@ -602,7 +821,7 @@ fn spawn_inner(host: String, port: u16, account: String, mut password: String, c
                 }
             }
         };
-        let auth = match authenticate_choosing(&host, port, &account, &password, NET_TIMEOUT, notice, choose, card) {
+        let auth = match authenticate_choosing_for(chronicle, &host, port, &account, &password, NET_TIMEOUT, notice, choose, card) {
             Ok(a) => a,
             Err(e) => {
                 let _ = ev_tx.send(match &e {
@@ -626,25 +845,26 @@ fn spawn_inner(host: String, port: u16, account: String, mut password: String, c
                 return;
             }
         };
-        tap(true, &protocol_version());
-        if let Err(e) = game.send(protocol_version()) {
+        let mut session = Session::new_for(chronicle, account, auth);
+        let opening = session.opening();
+        tap(true, &opening);
+        if let Err(e) = game.send(opening) {
             let _ = ev_tx.send(NetEvent::Error(e.to_string()));
             let _ = ev_tx.send(NetEvent::Closed);
             return;
         }
-        let mut session = Session::new(account, auth);
         loop {
             while let Ok(cmd) = cmd_rx.try_recv() {
                 let body = match cmd {
                     NetCommand::Select(slot) => session.select(slot),
                     NetCommand::SelectTransfer { slot, position } => session.select_transfer(slot, position),
                     NetCommand::Logout | NetCommand::Shutdown => {
-                        let _ = game.send(logout());
+                        let _ = game.send(session.logout_packet());
                         let _ = ev_tx.send(NetEvent::Closed);
                         return;
                     }
                     NetCommand::ChooseServer(_) | NetCommand::NoticeAnswer(_) | NetCommand::CardAnswer(_) => continue,
-                    other => match encode(&other) {
+                    other => match encode_for(chronicle, &other) {
                         Some(body) => body,
                         None => continue,
                     },
@@ -837,6 +1057,71 @@ mod tests {
 
         login_thread.join().unwrap();
         game_thread.join().unwrap();
+    }
+
+    #[test]
+    fn high_five_lobby_commands_use_the_high_five_opcodes_and_the_rest_waits() {
+        use l2_dat::Chronicle::{C4, HighFive};
+        assert_eq!(encode_for(HighFive, &NetCommand::NewCharacter), Some(vec![0x13]));
+        assert_eq!(encode_for(HighFive, &NetCommand::CharacterDelete { slot: 2 }), Some(vec![0x0d, 2, 0, 0, 0]));
+        assert_eq!(encode_for(HighFive, &NetCommand::CharacterRestore { slot: 2 }), Some(vec![0x7b, 2, 0, 0, 0]));
+        assert_eq!(encode_for(HighFive, &NetCommand::Restart), Some(vec![0x57]));
+        assert_eq!(encode_for(HighFive, &NetCommand::ObserverEnd), None);
+        assert_eq!(encode_for(C4, &NetCommand::NewCharacter), encode(&NetCommand::NewCharacter));
+        assert_eq!(encode_for(C4, &NetCommand::Restart), encode(&NetCommand::Restart));
+    }
+
+    #[test]
+    fn high_five_gm_and_player_commands_reach_the_wire_with_their_own_opcodes() {
+        use l2_dat::Chronicle::{C4, HighFive};
+        let gm = NetCommand::GmCommand { name: "Luz".into(), kind: 1 };
+        assert_eq!(encode_for(HighFive, &gm), Some(l2_net::game::high_five_world::request_gm_command("Luz", 1)));
+        assert_ne!(encode_for(HighFive, &gm), encode(&gm));
+        assert_eq!(encode_for(C4, &gm), encode(&gm));
+        assert_eq!(encode_for(HighFive, &NetCommand::RequestGmList), Some(vec![0x8b]));
+        assert_eq!(encode_for(HighFive, &NetCommand::UserCommand { command: 109 }), Some(vec![0xb3, 109, 0, 0, 0]));
+        assert_eq!(encode_for(HighFive, &NetCommand::ShowMinimap), Some(vec![0x6c]));
+        assert_eq!(encode_for(HighFive, &NetCommand::DismissParty), Some(vec![0x46]));
+        assert_eq!(encode_for(HighFive, &NetCommand::RequestRemainTime), Some(vec![0xb2]));
+        assert_eq!(encode_for(HighFive, &NetCommand::SocialAction { action: 3 }), Some(vec![0x34, 3, 0, 0, 0]));
+        assert_eq!(encode_for(HighFive, &NetCommand::DeleteMacro { id: 3 }), Some(vec![0xce, 3, 0, 0, 0]));
+        assert_eq!(encode_for(HighFive, &NetCommand::RestartPoint { point: 1 }), Some(vec![0x7d, 1, 0, 0, 0]));
+    }
+
+    #[test]
+    fn high_five_session_only_commands_stay_without_a_packet() {
+        use l2_dat::Chronicle::HighFive;
+        for command in [NetCommand::Logout, NetCommand::Shutdown, NetCommand::Select(0), NetCommand::ChooseServer(1)] {
+            assert_eq!(encode_for(HighFive, &command), None);
+            assert_eq!(encode(&command), None);
+        }
+    }
+
+    #[test]
+    fn high_five_world_commands_use_the_oracle_opcodes() {
+        use l2_dat::Chronicle::HighFive;
+        let op = |command: NetCommand| encode_for(HighFive, &command).map(|body| body[0]);
+        assert_eq!(op(NetCommand::MoveTo { target: [1, 2, 3], origin: [4, 5, 6] }), Some(0x0f));
+        assert_eq!(op(NetCommand::Validate { position: [1, 2, 3], heading: 4 }), Some(0x59));
+        assert_eq!(op(NetCommand::ValidateInVehicle { vehicle_id: 9, position: [1, 2, 3], heading: 4 }), Some(0x59));
+        assert_eq!(op(NetCommand::Say { text: "oi".into(), kind: 0, target: String::new() }), Some(0x49));
+        assert_eq!(op(NetCommand::Action { object_id: 1, origin: [0; 3], shift: false }), Some(0x1f));
+        assert_eq!(op(NetCommand::AttackRequest { object_id: 1, origin: [0; 3], shift: false }), Some(0x32));
+        assert_eq!(op(NetCommand::UseItem { object_id: 1, ctrl: false }), Some(0x19));
+        assert_eq!(op(NetCommand::UseSkill { skill_id: 1, ctrl: false, shift: false }), Some(0x39));
+        assert_eq!(op(NetCommand::UseAction { id: 1, ctrl: false, shift: false }), Some(0x56));
+        assert_eq!(op(NetCommand::Appearing), Some(0x3a));
+        assert_eq!(op(NetCommand::RequestItemList), Some(0x14));
+        assert_eq!(op(NetCommand::RequestSkillList), Some(0x50));
+        assert_eq!(op(NetCommand::TargetCancel), Some(0x48));
+        assert_eq!(op(NetCommand::GameGuardReply { keys: [0; 4] }), Some(0xcb));
+        assert_eq!(op(NetCommand::ManorList), Some(0xd0));
+        assert_eq!(encode_for(HighFive, &NetCommand::ChangeWaitType { standing: true }), Some(vec![0x56, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(encode_for(HighFive, &NetCommand::ChangeMoveType { running: true }), Some(vec![0x56, 1, 0, 0, 0, 0, 0, 0, 0, 0]));
+        assert_eq!(op(NetCommand::SocialAction { action: 2 }), Some(0x34));
+        assert_eq!(op(NetCommand::ShortcutUse { slot: 0, page: 0, ctrl: 0 }), None);
+        let drop = encode_for(HighFive, &NetCommand::DropItem { object_id: 7, count: 5, position: [1, 2, 3] }).unwrap();
+        assert_eq!(drop.len(), 1 + 4 + 8 + 12);
     }
 
     #[test]

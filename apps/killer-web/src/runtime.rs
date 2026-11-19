@@ -1,7 +1,7 @@
 #[path = "options.rs"]
 pub(crate) mod options;
 use crate::characters::{self, CharacterCache, DisplaySettings, Frame, LoadedCharacter};
-use crate::loader::{LoadResult, Shared, load_character};
+use crate::loader::{LoadResult, Shared};
 use crate::ui2d::{self, GameUi};
 use crate::ui_modern::ModernHud;
 use glam::Vec3;
@@ -14,6 +14,9 @@ use killer_render::renderer::Renderer;
 use killer_ui::chat::ChatEntry;
 use killer_world::World;
 use std::sync::Arc;
+
+const CHARACTER_INFLIGHT: usize = 16;
+const CHARACTER_BUDGET_MS: f64 = 4.0;
 
 #[derive(Default)]
 struct Marks {
@@ -86,11 +89,15 @@ pub struct Runtime {
     pub loading_profile: [f64;4],
     pub profile: [f64;4],
     pub profile_frames: u32,
+    pub load_worst: f64,
+    pub load_total: f64,
+    pub loads: u32,
+    inflight: Vec<(characters::AppearanceKey,killer_platform::deferred_io::Ticket)>,
 }
 
 impl Runtime {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(mut client: Client, level: ue2_level::Level, scene: killer_assets::scene::Scene, renderer: &Renderer, format: wgpu::TextureFormat, size: (u32,u32), scale: f32, spawn: Option<(Vec3,i32)>, trace_file: Option<web_sys::Blob>, table_cache: &mut crate::table_cache::SessionTables) -> Result<Self, String> {
+    pub fn new(mut client: Client, level: ue2_level::Level, scene: killer_assets::scene::Scene, renderer: &Renderer, format: wgpu::TextureFormat, size: (u32,u32), scale: f32, spawn: Option<(Vec3,i32)>, trace_file: Option<web_sys::Blob>, table_cache: &mut crate::table_cache::SessionTables, crowd: (usize,bool)) -> Result<Self, String> {
         let started = Instant::now();
         let tables = table_cache.load(&mut client).map_err(|e| e.to_string())?;
         let user = killer_ui::ini::parse_ini(&client.read_system_text("user.ini").map_err(|e| e.to_string())?);
@@ -104,11 +111,35 @@ impl Runtime {
         let (anchor,heading) = spawn.unwrap_or((Vec3::new(83400.0,148000.0,-3400.0),16384));
         let orbit = crate::camera::OrbitCamera::behind(anchor,heading,crate::camera::CameraSettings::from_ini(&user));
         let binds = killer_world::engine_input::KeyBinds::from_ini(|name| user.get(killer_world::engine_input::INPUT_SECTION,name));
-        let mut world = if spawn.is_some() {World::default()} else {characters::demo_world(anchor,heading,0)};
-        world.rotation_rates=tables.rotation_rates.clone();
-        world.enter_events=tables.entereventgrp.clone();
-        world.walk_anim_frames=tables.walk_anim_frames();
-        if spawn.is_none() {crate::ui_keys::demo_fill(&mut world);}
+        let mut world = if spawn.is_some() {World::default()} else {characters::demo_world(anchor,heading,crowd.0)};
+        if crowd.1 {
+            use l2_dat::armorgrp::body_part;
+            use l2_net::game::packets::{EQUIP_CHEST,EQUIP_FEET,EQUIP_GLOVES,EQUIP_HEAD,EQUIP_LEGS,EQUIP_LHAND,EQUIP_LRHAND,EQUIP_RHAND};
+            let armors=|parts: &[u32]|{let mut ids: Vec<i32>=tables.armorgrp.values().filter(|armor|parts.contains(&armor.body_part)).map(|armor|armor.id as i32).collect();ids.sort_unstable();ids};
+            let weapons=|part: u32|{let mut ids: Vec<i32>=tables.weapongrp.values().filter(|weapon|weapon.body_part==part).map(|weapon|weapon.id as i32).collect();ids.sort_unstable();ids};
+            let pick=|ids: &[i32],index: usize,stride: usize|if ids.is_empty() {0} else {ids[(index*stride)%ids.len()]};
+            let (chests,legs,gloves,feet,heads,shields)=(armors(&[body_part::CHEST,body_part::ONEPIECE]),armors(&[body_part::LEGS]),armors(&[body_part::GLOVES]),armors(&[body_part::FEET]),armors(&[body_part::HEAD]),armors(&[body_part::LHAND]));
+            let (one_hand,two_hand)=(weapons(body_part::RHAND),weapons(body_part::LRHAND));
+            for (index,entity) in world.entities.values_mut().filter(|entity|entity.object_id>=characters::DEMO_CROWD_FIRST_ID).enumerate() {
+                if let killer_world::EntityKind::Player {race,sex,hair_style,hair_color,face,equipped,..}=&mut entity.kind {
+                    *race=(index%5) as i32;*sex=((index/5)%2) as i32;*hair_style=((index/10)%5) as i32;*hair_color=((index/50)%4) as i32;*face=((index/200)%3) as i32;
+                    *equipped=[0;l2_net::game::packets::VISIBLE_EQUIP_SLOTS];
+                    equipped[EQUIP_CHEST]=pick(&chests,index,7);
+                    equipped[EQUIP_LEGS]=pick(&legs,index,11);
+                    equipped[EQUIP_GLOVES]=pick(&gloves,index,13);
+                    equipped[EQUIP_FEET]=pick(&feet,index,17);
+                    if index%4==0 {equipped[EQUIP_HEAD]=pick(&heads,index,19);}
+                    if index%3==2 {
+                        let weapon=pick(&two_hand,index,23);
+                        equipped[EQUIP_RHAND]=weapon;
+                        equipped[EQUIP_LRHAND]=weapon;
+                    } else {
+                        equipped[EQUIP_RHAND]=pick(&one_hand,index,29);
+                        if index%2==0 {equipped[EQUIP_LHAND]=pick(&shields,index,31);}
+                    }
+                }
+            }
+        }
         let setup_ms = started.elapsed().as_secs_f64()*1000.0;
         let ground = crate::ground::GroundGrid::build(&scene);
         let lights = LightMap::new(&level,&scene.lights);
@@ -133,7 +164,7 @@ impl Runtime {
         let music_times=client.read_system_text("alaudio.int").map(|text|{let ini=killer_ui::ini::parse_ini(&text);crate::zone_music::MusicTimes::read(|section,key|ini.get(section,key).map(str::to_owned))}).unwrap_or_default();
         if let Err(error)=shared.collision.tile(&mut client,&killer_assets::tiles::tile_name(anchor.x,anchor.y),&level) {log::warn!("colisão do tile: {error}");}
         Ok(Self { client,audio,audio_frame:None,audio_time:0.0,world,ui,orbit,ground,trace,tables,cache:{let mut cache=CharacterCache::default();cache.set_sound_config(sound_config);cache},items:Default::default(),fences:Default::default(),sound_bank:Default::default(),shakes:Default::default(),fade:Default::default(),fade_shown:false,effects:Default::default(),abnormal:Default::default(),shared,walk_warned:Default::default(),walk_state:Default::default(),marks:Default::default(),level,zones,neighbours,moving_trace:Default::default(),options,video:None,labels:Vec::new(),lights,display,
-            bank:TextureBank::new(),radar_toggle:false,binds,modern,context:egui::Context::default(),painter:egui_wgpu::Renderer::new(renderer.device(),format,Default::default()),chat:Vec::new(),crest_inbox:Default::default(),scale,tile:killer_assets::tiles::tile_name(anchor.x,anchor.y),online:spawn.is_some(),disconnect_accepted:false,leave_requested:false,exit_requested:false,keyboard_moving:false,cursor:None,hovered:None,loading_profile:[setup_ms,ground_ms-setup_ms,trace_ms-ground_ms,started.elapsed().as_secs_f64()*1000.0-trace_ms],profile:[0.0;4],profile_frames:0,banks_age:0.0,zone_music:Default::default(),music_zone:None,music_times,fishing_host:Default::default(),fishing_target:None,appendix:Default::default(),windows_age:0.0,windows_saved:None,console_mark:Default::default() })
+            bank:TextureBank::new(),radar_toggle:false,binds,modern,context:egui::Context::default(),painter:egui_wgpu::Renderer::new(renderer.device(),format,Default::default()),chat:Vec::new(),crest_inbox:Default::default(),scale,tile:killer_assets::tiles::tile_name(anchor.x,anchor.y),online:spawn.is_some(),disconnect_accepted:false,leave_requested:false,exit_requested:false,keyboard_moving:false,cursor:None,hovered:None,loading_profile:[setup_ms,ground_ms-setup_ms,trace_ms-ground_ms,started.elapsed().as_secs_f64()*1000.0-trace_ms],profile:[0.0;4],profile_frames:0,load_worst:0.0,load_total:0.0,loads:0,inflight:Vec::new(),banks_age:0.0,zone_music:Default::default(),music_zone:None,music_times,fishing_host:Default::default(),fishing_target:None,appendix:Default::default(),windows_age:0.0,windows_saved:None,console_mark:Default::default() })
     }
 
     pub fn ground_diagnostic(&self) -> Option<serde_json::Value> {
@@ -280,6 +311,7 @@ impl Runtime {
                 self.options=options;
                 self.moving_trace=Default::default();
                 self.cache=CharacterCache::default();
+                self.inflight.clear();
                 self.appendix.clear();
                 self.trace=crate::trace::TraceMesh::from_scene(&killer_assets::scene::Scene::default());
                 self.ground=crate::ground::GroundGrid::build(&scene);
@@ -605,6 +637,10 @@ impl Runtime {
                 },
                 UiCommand::CrestFile {kind,..}=>crate::crest_file::pick(kind,&self.crest_inbox),
                 UiCommand::InterfaceSound(name)=>self.interface_sound(name),
+                UiCommand::InterfaceSoundNamed(name)=>self.interface_sound(&name),
+                UiCommand::ScriptChat(typed)=>self.say(typed),
+                UiCommand::ScriptTarget(object_id)=>self.action(ui2d::KeyAction::Select(object_id)),
+                UiCommand::ScriptCommand(line)=>self.ui.keys.chat_command(&self.world,&line),
             }
         }
         outgoing
@@ -816,10 +852,21 @@ impl Runtime {
         }
         renderer.set_instances(&instances);
         self.ui.keys.social_durations.clone_from(&self.cache.social_durations);
-        for key in self.cache.take_wanted(1) {
+        let loading_started=Instant::now();
+        let mut waiting=Vec::new();
+        let queued=std::mem::take(&mut self.inflight);
+        let fresh=self.cache.take_wanted(CHARACTER_INFLIGHT.saturating_sub(queued.len()));
+        for (key,ticket) in queued.into_iter().chain(fresh.into_iter().map(|key|(key,Default::default()))) {
+            if loading_started.elapsed().as_secs_f64()*1000.0>=CHARACTER_BUDGET_MS || !killer_platform::deferred_io::ready(&ticket) {waiting.push((key,ticket));continue;}
+            let load_started=Instant::now();
             let Some(look) = characters::look(key,&self.tables) else { self.cache.fail(key); continue };
-            match load_character(&mut self.client,&mut self.shared,key,&look.appearance,look.draw_scale) {
-                LoadResult::Character {parts,animation,draw_scale,weapon_type,mut bank,render_defaults,effects,..} => {
+            match crate::loader::try_load_character(&mut self.client,&mut self.shared,key,&look.appearance,look.draw_scale) {
+                Err(ticket)=>{
+                    waiting.push((key,ticket));
+                    self.load_total+=load_started.elapsed().as_secs_f64()*1000.0;
+                    continue;
+                }
+                Ok(LoadResult::Character {parts,animation,draw_scale,weapon_type,mut bank,render_defaults,effects,..}) => {
                     let parts = parts.into_iter().map(|mesh| {
                         let id = renderer.upload_character(&mesh,&mut BankSource {bank:&mut bank,catalog:self.client.catalog()});
                         (id,Arc::new(mesh))
@@ -829,9 +876,15 @@ impl Runtime {
                         self.cache.insert(key,character.with_effects(effects.effects,effects.bank));
                     } else { self.cache.fail(key); }
                 }
-                _ => self.cache.fail(key),
+                Ok(_) => self.cache.fail(key),
             }
+            let spent=load_started.elapsed().as_secs_f64()*1000.0;
+            self.load_worst=self.load_worst.max(spent);
+            self.load_total+=spent;
+            self.loads+=1;
         }
+        self.inflight=waiting;
+        killer_platform::deferred_io::dispatch();
         self.effects.set_viewer(camera.eye,killer_assets::scene::transform::vector_rotation(camera.target-camera.eye),self.neighbours.zone_at(camera.eye).unwrap_or_else(||{let zone=self.level.bsp_tree.zone_at(camera.eye.to_array());if usize::from(zone)<self.zones {zone}else{0}}));
         self.abnormal.sync(&mut self.cache,&mut self.world,&drawn,&mut self.client,&self.tables,dt);
         self.effects.sync(renderer,&mut self.cache,&mut self.client,&self.world,&self.options);

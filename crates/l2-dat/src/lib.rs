@@ -33,11 +33,16 @@ pub mod skillgrp;
 pub mod skillname;
 pub mod skillsoundgrp;
 pub mod staticobject;
+pub mod swf;
 pub mod symbolname;
 pub mod sysstring;
 pub mod systemmsg;
 pub mod weapongrp;
+pub mod xdat;
 pub mod zonename;
+
+#[cfg(test)]
+mod high_five_tests;
 
 use std::collections::HashMap;
 use thiserror::Error;

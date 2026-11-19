@@ -20,6 +20,10 @@ pub const NUMBER_STRIP: DigitStrip =
 pub const XLARGE_NUMBER_STRIP: DigitStrip =
     DigitStrip { texture: XLARGE_DIGIT_TEXTURE, cell_width: 11, cell_height: 14 };
 
+pub const H5_STATUS_NUMBER_TEXTURE: &str = "L2ui_ct1.Misc_df_statusnumber";
+pub const H5_STATUS_NUMBER_STRIP: DigitStrip =
+    DigitStrip { texture: H5_STATUS_NUMBER_TEXTURE, cell_width: 8, cell_height: 16 };
+
 pub fn digits_width(text: &str) -> i32 {
     digits_width_of(NUMBER_STRIP, text)
 }

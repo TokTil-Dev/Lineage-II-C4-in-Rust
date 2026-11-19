@@ -126,7 +126,9 @@ python3 scripts/web.py run            # builds the wasm and serves http://127.0.
 
 Open `http://127.0.0.1:8080` in Chrome or Edge and pick your C4 client folder with the
 "open client folder" button. The files are read locally in the browser; nothing is uploaded.
-`/?mode=demo` opens the offline Giran preview.
+`/?mode=demo` opens the offline Giran preview; `/?mode=demo&crowd=300&varied=1` fills it with 300 equipped characters
+of every race, which is the scene used to measure loading and frame times. When `clientUrl` is set in
+`web/config.mjs` the page starts by itself in the saved interface style; `/?gate=1` shows the entry screen instead.
 
 Browsers cannot open raw TCP sockets, so online play goes through a small WebSocket gateway. Run it
 in a second terminal, pointing at the login and game servers:

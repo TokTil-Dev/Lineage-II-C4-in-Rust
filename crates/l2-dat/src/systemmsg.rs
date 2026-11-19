@@ -34,7 +34,7 @@ pub fn read(body: &[u8]) -> Result<Vec<SystemMessage>, Error> {
 pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<SystemMessage>, Error> {
     match chronicle {
         crate::Chronicle::C4 => read(body),
-        crate::Chronicle::Interlude => read_interlude(body).map(|rows| rows.into_iter().map(|(message, _)| message).collect()),
+        crate::Chronicle::Interlude | crate::Chronicle::HighFive => read_interlude(body).map(|rows| rows.into_iter().map(|(message, _)| message).collect()),
     }
 }
 

@@ -40,10 +40,23 @@ pub fn read(body: &[u8]) -> Result<Vec<QuestName>, Error> {
         .collect()
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuestHighFive {
+    pub classes: Vec<i32>,
+    pub extra_ids: Vec<i32>,
+    pub extra: [i32; 3],
+    pub level_limit: i32,
+    pub flag: i32,
+    pub reward_items: Vec<i32>,
+    pub reward_counts: Vec<i32>,
+    pub steps: Vec<i32>,
+}
+
 pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<QuestName>, Error> {
     match chronicle {
         crate::Chronicle::C4 => read(body),
         crate::Chronicle::Interlude => read_interlude(body).map(|rows| rows.into_iter().map(|(quest, _)| quest).collect()),
+        crate::Chronicle::HighFive => read_high_five(body).map(|rows| rows.into_iter().map(|(quest, _)| quest).collect()),
     }
 }
 
@@ -57,6 +70,27 @@ pub fn read_interlude(body: &[u8]) -> Result<Vec<(QuestName, QuestExtra)>, Error
                 classes: int_array(&mut reader)?,
                 extra_ids: int_array(&mut reader)?,
                 extra: [reader.i32()?, reader.i32()?, reader.i32()?, reader.i32()?],
+            };
+            Ok((QuestName { index: index as usize, ..row }, extra))
+        })
+        .collect()
+}
+
+pub fn read_high_five(body: &[u8]) -> Result<Vec<(QuestName, QuestHighFive)>, Error> {
+    let mut reader = DatReader::new(body);
+    let count = reader.u32()?;
+    (0..count)
+        .map(|index| {
+            let row = record(&mut reader)?;
+            let extra = QuestHighFive {
+                classes: int_array(&mut reader)?,
+                extra_ids: int_array(&mut reader)?,
+                extra: [reader.i32()?, reader.i32()?, reader.i32()?],
+                level_limit: reader.i32()?,
+                flag: reader.i32()?,
+                reward_items: int_array(&mut reader)?,
+                reward_counts: int_array(&mut reader)?,
+                steps: int_array(&mut reader)?,
             };
             Ok((QuestName { index: index as usize, ..row }, extra))
         })

@@ -48,6 +48,13 @@ pub struct Catalog {
     enchant_color_override: Option<(String, [[u8; 3]; 2])>,
     class_defaults: HashMap<String, std::sync::Arc<Vec<material::ClassDefault>>>,
     engine_classes: HashMap<String, bool>,
+    attempt: Option<Attempt>,
+}
+
+#[derive(Default)]
+struct Attempt {
+    class_defaults: Vec<String>,
+    engine_classes: Vec<String>,
 }
 
 struct Loaded {
@@ -212,6 +219,24 @@ impl Catalog {
                 .filter_map(|loaded| loaded.whole.as_ref())
                 .map(Vec::capacity)
                 .sum::<usize>()
+    }
+
+    pub fn begin_attempt(&mut self) {
+        self.attempt = Some(Attempt::default());
+    }
+
+    pub fn finish_attempt(&mut self, keep: bool) {
+        let Some(attempt) = self.attempt.take() else { return };
+        if keep {
+            return;
+        }
+        self.packages.retain(|_, loaded| loaded.is_some());
+        for key in attempt.class_defaults {
+            self.class_defaults.remove(&key);
+        }
+        for key in attempt.engine_classes {
+            self.engine_classes.remove(&key);
+        }
     }
 
     /// Drops every byte read from the packages, keeping the indexes.
@@ -620,6 +645,9 @@ impl Catalog {
             return *known;
         }
         let known = self.object(&format!("engine.{class}"), "Class").is_some();
+        if let Some(attempt) = &mut self.attempt {
+            attempt.engine_classes.push(key.clone());
+        }
         self.engine_classes.insert(key, known);
         known
     }
@@ -747,18 +775,59 @@ impl Seek for PackageFile {
     }
 }
 
+struct Tracked<R> {
+    input: R,
+    position: u64,
+    high: u64,
+}
+
+impl<R: Read> Read for Tracked<R> {
+    fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+        let count = self.input.read(bytes)?;
+        self.position += count as u64;
+        self.high = self.high.max(self.position);
+        Ok(count)
+    }
+}
+
+impl<R: Seek> Seek for Tracked<R> {
+    fn seek(&mut self, from: SeekFrom) -> io::Result<u64> {
+        self.position = self.input.seek(from)?;
+        Ok(self.position)
+    }
+}
+
+fn read_index(path: &Path, mut file: File, window: Window) -> Option<Package> {
+    let header = window.file_offset(0);
+    let body = file.metadata().ok()?.len().checked_sub(header)?;
+    let trailer = l2_crypto::TRAILER_LEN as u64;
+    if header != 0 && body >= trailer {
+        let mut tracked = Tracked { input: BufReader::new(PackageFile { file, window }), position: 0, high: 0 };
+        let limit = body - trailer;
+        if let Ok(package) = Package::read(&mut tracked, usize::try_from(body).ok()?)
+            && tracked.high <= limit
+            && package.exports().iter().all(|export| (export.serial_offset + export.serial_size) as u64 <= limit)
+        {
+            return Some(package);
+        }
+        if killer_platform::deferred_io::blocked() {
+            return None;
+        }
+        file = File::open(path).ok()?;
+    }
+    let size = usize::try_from(window.payload_len(&mut file).ok()?).ok()?;
+    Package::read(BufReader::new(PackageFile { file, window }), size).ok()
+}
+
 fn load(path: &Path) -> Option<Loaded> {
     let mut file = File::open(path).ok()?;
+    killer_platform::deferred_io::want_edges(&file);
     let mut header = [0; 28];
     let count = usize::try_from(file.metadata().ok()?.len().min(header.len() as u64)).ok()?;
     file.read_exact(&mut header[..count]).ok()?;
     let window = Window::of(&header[..count], path).ok()?;
     let (package, whole) = match window {
-        Some(window) => {
-            let size = usize::try_from(window.payload_len(&mut file).ok()?).ok()?;
-            let reader = BufReader::new(PackageFile { file, window });
-            (Package::read(reader, size).ok()?, None)
-        }
+        Some(window) => (read_index(path, file, window)?, None),
         None => {
             let file = l2_crypto::decrypt_owned(fs::read(path).ok()?, path).ok()?;
             (Package::parse(&file).ok()?, Some(file))
@@ -880,6 +949,74 @@ mod tests {
         let (bytes, body_at) = package_bytes(body);
         fs::write(textures.join("alpha.utx"), bytes).unwrap();
         (root, body_at)
+    }
+
+    fn wrapped(plain: &[u8], trailer: bool) -> Vec<u8> {
+        let mut bytes: Vec<u8> = "Lineage2Ver111".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        bytes.extend(plain.iter().map(|byte| byte ^ 0xAC));
+        if trailer {
+            let mut hasher = flate2::Crc::new();
+            hasher.update(&bytes);
+            let mut tail = [0u8; l2_crypto::TRAILER_LEN];
+            tail[12..16].copy_from_slice(&hasher.sum().to_le_bytes());
+            bytes.extend_from_slice(&tail);
+        }
+        bytes
+    }
+
+    type Spans = Vec<(usize, usize)>;
+
+    fn index_pair(name: &str, bytes: &[u8]) -> (Spans, Spans) {
+        let root = std::env::temp_dir().join(format!("l2-catalog-index-{name}-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("alpha.utx");
+        fs::write(&path, bytes).unwrap();
+        let window = Window::of(&bytes[..28], &path).unwrap().unwrap();
+        let spans = |package: &Package| package.exports().iter().map(|export| (export.serial_offset, export.serial_size)).collect::<Vec<_>>();
+        let fast = spans(&read_index(&path, File::open(&path).unwrap(), window).unwrap());
+        let mut file = File::open(&path).unwrap();
+        let size = window.payload_len(&mut file).unwrap() as usize;
+        let exact = spans(&Package::read(BufReader::new(PackageFile { file, window }), size).unwrap());
+        fs::remove_dir_all(&root).unwrap();
+        (fast, exact)
+    }
+
+    #[test]
+    fn index_without_whole_file_checksum_matches_the_exact_reader() {
+        let (plain, body_at) = package_bytes(&[0xEE; 1000]);
+        let (fast, exact) = index_pair("signed", &wrapped(&plain, true));
+        assert_eq!(fast, exact);
+        assert_eq!(fast, [(body_at, 1000)]);
+        let (fast, exact) = index_pair("unsigned", &wrapped(&plain, false));
+        assert_eq!(fast, exact);
+        assert_eq!(fast, [(body_at, 1000)]);
+        let mut padded = plain.clone();
+        padded.extend_from_slice(&[0; 64]);
+        let (fast, exact) = index_pair("padded", &wrapped(&padded, false));
+        assert_eq!(fast, exact);
+    }
+
+    #[test]
+    #[ignore]
+    fn every_client_package_indexes_the_same_without_the_whole_file_checksum() {
+        let root = PathBuf::from(std::env::var_os("KILLER_CLIENT_DIR").unwrap());
+        let catalog = Catalog::open(&root);
+        let mut checked = 0;
+        for path in catalog.files.values() {
+            let mut file = File::open(path).unwrap();
+            let mut header = [0; 28];
+            if file.read_exact(&mut header).is_err() {
+                continue;
+            }
+            let Ok(Some(window)) = Window::of(&header, path) else { continue };
+            let spans = |package: &Package| package.exports().iter().map(|export| (export.serial_offset, export.serial_size)).collect::<Vec<_>>();
+            let fast = read_index(path, File::open(path).unwrap(), window).map(|package| spans(&package));
+            let mut file = File::open(path).unwrap();
+            let exact = window.payload_len(&mut file).ok().and_then(|size| Package::read(BufReader::new(PackageFile { file, window }), size as usize).ok()).map(|package| spans(&package));
+            assert_eq!(fast, exact, "{}", path.display());
+            checked += 1;
+        }
+        assert!(checked > 0);
     }
 
     #[test]

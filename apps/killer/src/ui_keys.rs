@@ -86,6 +86,10 @@ pub enum UiCommand {
     CrestFile { kind: killer_assets::crest::CrestKind, path: String },
     Log(String),
     InterfaceSound(&'static str),
+    InterfaceSoundNamed(String),
+    ScriptChat(String),
+    ScriptTarget(i32),
+    ScriptCommand(String),
     SystemMessage(u32),
     ColoredSystemMessage { id: u32, color: u32 },
     WarningMessage { id: u32, numbers: Vec<i32> },
@@ -2951,7 +2955,7 @@ impl KeyWindows {
         }
     }
 
-    fn use_action(&mut self, world: &World, id: i32, ctrl: bool, shift: bool) {
+    pub(crate) fn use_action(&mut self, world: &World, id: i32, ctrl: bool, shift: bool) {
         let player = world.targeted().filter(|target| matches!(target.kind, EntityKind::Player { .. }));
         match id {
             2 => self.attack_current_target(world, ctrl, shift),
@@ -3074,7 +3078,7 @@ impl KeyWindows {
     /// comando 0 no primeiro tick e depois espera o atraso de cada um pra passar pro próximo.
     /// Rodar um macro novo cancela o anterior, como no original (a flag é por macro e o
     /// `FUN_100a7860` zera tudo a cada tecla).
-    fn run_macro(&mut self, world: &World, id: i32) {
+    pub(crate) fn run_macro(&mut self, world: &World, id: i32) {
         let Some(entry) = world.macros.macros.iter().find(|m| m.id == id) else {
             log::info!("macro {id} não está na lista recebida do servidor ({} conhecidos)", world.macros.macros.len());
             return;
@@ -5252,7 +5256,7 @@ impl KeyWindows {
         self.use_item_object(object_id);
     }
 
-    fn use_shortcut_item(&mut self, world: &World, object_id: i32) {
+    pub(crate) fn use_shortcut_item(&mut self, world: &World, object_id: i32) {
         let dwarf = world.me.as_ref().is_some_and(|me| matches!(me.kind, EntityKind::Player { class_id, .. } if is_dwarven_class(class_id)));
         self.use_item_with(object_id, dwarf);
     }
@@ -5276,7 +5280,7 @@ impl KeyWindows {
         }
     }
 
-    fn unequip_paperdoll_slot(&mut self, slot: usize) {
+    pub(crate) fn unequip_paperdoll_slot(&mut self, slot: usize) {
         if let Some(item) = self.inventory.paperdoll_item(slot)
             && let Some(mask) = unequip_mask(item.body_part, item.object_id, &self.inventory.paperdoll_ids)
         {

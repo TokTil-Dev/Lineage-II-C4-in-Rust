@@ -213,6 +213,18 @@ pub mod cursor;
 pub mod touch;
 
 #[cfg(target_arch = "wasm32")]
+#[path = "../../killer/src/ui_interlude.rs"]
+pub mod ui_interlude;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../../killer/src/lobby_h5.rs"]
+pub mod lobby_h5;
+
+#[cfg(target_arch = "wasm32")]
+#[path = "../../killer/src/interlude_script/mod.rs"]
+pub mod interlude_script;
+
+#[cfg(target_arch = "wasm32")]
 mod lobby_ui;
 
 pub mod lobby_input;

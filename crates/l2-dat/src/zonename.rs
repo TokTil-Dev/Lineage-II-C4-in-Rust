@@ -46,13 +46,22 @@ pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<ZoneName>
     match chronicle {
         crate::Chronicle::C4 => read(body),
         crate::Chronicle::Interlude => Ok(read_interlude(body)?.into_iter().map(|(zone, _)| zone).collect()),
+        crate::Chronicle::HighFive => Ok(read_high_five(body)?.into_iter().map(|(zone, _)| zone).collect()),
     }
 }
 
 pub fn read_interlude(body: &[u8]) -> Result<Vec<(ZoneName, ZoneMapInfo)>, Error> {
+    read_map_zones(body, false)
+}
+
+pub fn read_high_five(body: &[u8]) -> Result<Vec<(ZoneName, ZoneMapInfo)>, Error> {
+    read_map_zones(body, true)
+}
+
+fn read_map_zones(body: &[u8], high_five: bool) -> Result<Vec<(ZoneName, ZoneMapInfo)>, Error> {
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;
-    let zones = (0..count).map(|_| interlude_record(&mut reader)).collect::<Result<Vec<_>, _>>()?;
+    let zones = (0..count).map(|_| interlude_record(&mut reader, high_five)).collect::<Result<Vec<_>, _>>()?;
     let at = body.len() - reader.remaining();
     if reader.ascf()? != FOOTER || reader.remaining() != 0 {
         return Err(Error::InvalidString(at));
@@ -60,13 +69,16 @@ pub fn read_interlude(body: &[u8]) -> Result<Vec<(ZoneName, ZoneMapInfo)>, Error
     Ok(zones)
 }
 
-fn interlude_record(r: &mut DatReader<'_>) -> Result<(ZoneName, ZoneMapInfo), Error> {
+fn interlude_record(r: &mut DatReader<'_>, high_five: bool) -> Result<(ZoneName, ZoneMapInfo), Error> {
     let zone = record(r)?;
     let info = ZoneMapInfo {
         values: [r.i32()?, r.i32()?, r.i32()?, r.i32()?, r.i32()?, r.i32()?],
         scale: r.f32()?,
         texture: r.ascf()?,
     };
+    if high_five {
+        r.u32()?;
+    }
     Ok((zone, info))
 }
 

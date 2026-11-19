@@ -517,7 +517,7 @@ impl BotSession {
                 out.push(BotEvent::Log(format!("criação recusada: {}", create_failure(*reason))));
                 return;
             }
-            SessionEvent::UserInfo(_) => {
+            SessionEvent::UserInfo(_) | SessionEvent::UserInfoHighFive { .. } => {
                 let first = self.world.me.is_none();
                 self.world.apply(&event);
                 if first {

@@ -1,4 +1,4 @@
-use crate::armorgrp::{self, ICONS, item_head};
+use crate::armorgrp::{self, ICONS, item_head_as};
 use crate::etcitemgrp;
 use crate::weapongrp;
 use crate::{DatReader, Error};
@@ -45,7 +45,7 @@ fn read_with(body: &[u8], kind: ItemKind, chronicle: crate::Chronicle) -> Result
     let count = reader.u32()?;
     (0..count)
         .map(|_| {
-            let head = item_head(&mut reader)?;
+            let head = item_head_as(&mut reader, chronicle)?;
             let icon =
                 ItemIcon { id: head.id, kind, drop: head.drop.clone(), icons: head.icons.clone(), weight: head.weight, type1: head.type1 };
             match kind {
@@ -53,7 +53,7 @@ fn read_with(body: &[u8], kind: ItemKind, chronicle: crate::Chronicle) -> Result
                     weapongrp::body_as(&mut reader, head.id, chronicle)?;
                 }
                 ItemKind::Armor => {
-                    armorgrp::body(&mut reader, head.id)?;
+                    armorgrp::body_as(&mut reader, head.id, chronicle)?;
                 }
                 ItemKind::Etc => {
                     etcitemgrp::record(&mut reader, head)?;

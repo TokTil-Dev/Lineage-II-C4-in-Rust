@@ -31,6 +31,7 @@ pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<ItemName>
     match chronicle {
         crate::Chronicle::C4 => read(body),
         crate::Chronicle::Interlude => read_interlude(body).map(|rows| rows.into_iter().map(|(item, _)| item).collect()),
+        crate::Chronicle::HighFive => read_high_five(body).map(|rows| rows.into_iter().map(|(item, _)| item).collect()),
     }
 }
 
@@ -43,6 +44,33 @@ pub fn read_interlude(body: &[u8]) -> Result<Vec<(ItemName, ItemNameSet)>, Error
             Ok((item, set_block(&mut reader)?))
         })
         .collect()
+}
+
+pub fn read_high_five(body: &[u8]) -> Result<Vec<(ItemName, ItemNameSet)>, Error> {
+    let mut reader = DatReader::new(body);
+    let count = reader.u32()?;
+    (0..count)
+        .map(|_| {
+            let item = record(&mut reader)?;
+            Ok((item, set_block_high_five(&mut reader)?))
+        })
+        .collect()
+}
+
+fn id_list(reader: &mut DatReader<'_>) -> Result<(String, String), Error> {
+    reader.u32()?;
+    let ids = reader.unicode_array()?.join(",");
+    Ok((ids, reader.ascf()?))
+}
+
+fn set_block_high_five(reader: &mut DatReader<'_>) -> Result<ItemNameSet, Error> {
+    let (set_ids, set_effect) = id_list(reader)?;
+    let (extra_ids, extra_effect) = id_list(reader)?;
+    let (enchant_ids, enchant_effect) = id_list(reader)?;
+    let enchant_level = reader.u32()?;
+    let enchant_text = reader.ascf()?;
+    reader.u32()?;
+    Ok(ItemNameSet { set_ids, set_effect, extra_ids, extra_effect, enchant_ids, enchant_effect, enchant_level, enchant_text })
 }
 
 fn record(reader: &mut DatReader<'_>) -> Result<ItemName, Error> {

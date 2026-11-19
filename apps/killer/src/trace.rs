@@ -395,11 +395,12 @@ mod tests {
         let mut expected = Vec::new();
         let mut base = 0u32;
         for draw in solid_draws(scene) {
-            for (actual, vertex) in mesh.positions[base as usize..].iter().zip(&draw.vertices) {
+            for (actual, vertex) in mesh.positions[base as usize..].iter().zip(draw.world_vertices()) {
                 assert_eq!(*actual, vertex.position);
             }
-            expected.extend(draw.indices.as_chunks::<3>().0.iter().map(|tri| (tri.map(|index| index + base), draw.kind == DrawKind::Terrain)));
-            base += draw.vertices.len() as u32;
+            let indices: Vec<u32> = draw.world_indices().collect();
+            expected.extend(indices.as_chunks::<3>().0.iter().map(|tri| (tri.map(|index| index + base), draw.kind == DrawKind::Terrain)));
+            base += (draw.vertices.len() * draw.instances.len().max(1)) as u32;
         }
         assert_eq!(mesh.positions.len(), base as usize);
         let mut actual: Vec<_> = mesh.indices.as_chunks::<3>().0.iter().copied().zip(mesh.terrain.iter().copied()).collect();

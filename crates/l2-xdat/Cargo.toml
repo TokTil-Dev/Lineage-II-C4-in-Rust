@@ -1,0 +1,12 @@
+[package]
+name = "l2-xdat"
+description = "Leitor do interface.xdat do cliente Lineage 2 Interlude (janelas, controles, atalhos e posições padrão)."
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+ue2-core = { path = "../ue2-core" }
+l2-crypto = { path = "../l2-crypto" }
+thiserror.workspace = true

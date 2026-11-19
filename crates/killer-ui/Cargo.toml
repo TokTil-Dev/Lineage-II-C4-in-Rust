@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 glam.workspace = true
 l2-dat = { path = "../l2-dat" }
+l2-xdat = { path = "../l2-xdat" }
 killer-font = { path = "../killer-font" }
 
 [dev-dependencies]

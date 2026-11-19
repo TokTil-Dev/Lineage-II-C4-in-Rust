@@ -121,7 +121,9 @@ pub fn load_part_lod(client: &mut Client, part: &Part, lod: usize) -> Option<Cha
     let (packed, lod_info) = match client.catalog().try_skeletal_mesh_lod_with_info(&part.mesh, lod) {
         Ok(packed) => packed,
         Err(why) => {
-            log::warn!("malha {} (slot {}, LOD {lod}): {why}", part.mesh, part.slot);
+            if !killer_platform::deferred_io::blocked() {
+                log::warn!("malha {} (slot {}, LOD {lod}): {why}", part.mesh, part.slot);
+            }
             return None;
         }
     };

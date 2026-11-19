@@ -1060,8 +1060,15 @@ pub const CLIENT_ACTION_NEAREST_PAWN: i32 = 4;
 pub const CLIENT_ACTION_NEAREST_ITEM: i32 = 5;
 pub const CLIENT_ACTION_TARGET: i32 = 6;
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct UserExtras {
+    pub exp_percent: f32,
+    pub vitality: i32,
+}
+
 #[derive(Default)]
 pub struct World {
+    pub user_extras: Option<UserExtras>,
     pub object_cycle: std::cell::Cell<crate::object_scan::ObjectCycle>,
     pub store_matches: std::collections::HashMap<i32, u8>,
     pub teleport_fades: bool,
@@ -1151,6 +1158,10 @@ pub struct World {
 impl World {
     pub fn apply(&mut self, event: &SessionEvent) {
         match event {
+            SessionEvent::UserInfoHighFive { head, exp_percent, vitality } => {
+                self.user_extras = Some(UserExtras { exp_percent: *exp_percent as f32, vitality: *vitality });
+                self.apply(&SessionEvent::UserInfo(head.clone()));
+            }
             SessionEvent::UserInfo(head) => {
                 self.builder_level = head.builder_level;
                 let fresh = Entity::from_user_info(head);

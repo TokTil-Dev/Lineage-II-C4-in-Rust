@@ -2,7 +2,7 @@ use glam::{Mat4, Vec3};
 use killer_assets::animation::{find_sequence, palette, pose};
 use killer_assets::characters::{Part, Placement, WEAPON_R_BONE, bind_pose, load_part};
 use killer_assets::client::{Client, DatTables};
-use killer_assets::pawn::{Player, SLOT_HAIR_A, SLOT_HAIR_B};
+use killer_assets::pawn::{CharLook, Player, SLOT_HAIR_A, SLOT_HAIR_B};
 use l2_dat::Equipped;
 use std::path::PathBuf;
 
@@ -233,7 +233,7 @@ fn wait_pose_keeps_the_fighter_standing() {
 
 fn player<'a>(tables: &'a DatTables, row: usize, hair_style: i32, hair_color: i32, equipped: Equipped) -> Player<'a> {
     Player {
-        template: &tables.chargrp[row],
+        look: CharLook::Classic(&tables.chargrp[row]),
         row,
         face: 0,
         hair_style,

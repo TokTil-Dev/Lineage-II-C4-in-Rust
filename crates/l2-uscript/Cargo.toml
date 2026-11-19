@@ -1,0 +1,10 @@
+[package]
+name = "l2-uscript"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[dependencies]
+ue2-core = { path = "../ue2-core" }
+ue2-package = { path = "../ue2-package" }

@@ -76,9 +76,9 @@ impl CreditScreen {
 
     fn prepare(&mut self) {
         self.lines.clear();
-        let found = self.entry().map(|entry| (format!("{HTML_PREFIX}{}", entry.html), entry.image.clone()));
-        self.html_request = found.as_ref().map(|(html, _)| html.clone());
-        if let Some((_, image)) = found.filter(|(_, image)| image.chars().count() > 1) {
+        let entry = self.entry().cloned();
+        self.html_request = entry.as_ref().filter(|entry| !entry.html.is_empty()).map(|entry| format!("{HTML_PREFIX}{}", entry.html));
+        if let Some(image) = entry.map(|entry| entry.image).filter(|image| image.chars().count() > 1) {
             self.back = Some(image);
         }
     }

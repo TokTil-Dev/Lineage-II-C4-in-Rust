@@ -6,8 +6,8 @@ use killer_assets::MissingAsset;
 use killer_assets::characters::{CharacterMesh, load_part};
 use killer_assets::client::{Client, DatTables};
 use killer_assets::pawn::{
-    Appearance, Part, Placement, Player, SLOT_BODY, SLOT_BOOTS, SLOT_FACE, SLOT_GLOVES, SLOT_HAIR_A, SLOT_HAIR_B,
-    SLOT_HELM, SLOT_LEFT_ARM, SLOT_LEFT_HAND, SLOT_LEGS, SLOT_RIGHT_HAND,
+    Appearance, CharLook, Part, Placement, Player, SLOT_BODY, SLOT_BOOTS, SLOT_FACE, SLOT_GLOVES, SLOT_HAIR_A,
+    SLOT_HAIR_B, SLOT_HELM, SLOT_LEFT_ARM, SLOT_LEFT_HAND, SLOT_LEGS, SLOT_RIGHT_HAND,
 };
 use killer_assets::textures::TextureBank;
 use killer_render::skinned::CharacterId;
@@ -35,6 +35,22 @@ const CLASSES: [(usize, &str, f32, f32); 14] = [
     (11, "forc", 7.0, 27.0),
     (12, "mshaman", 7.0, 27.0),
     (13, "fshaman", 8.0, 25.5),
+];
+const CLASS_ROW_IDENTITY: [(i32, i32, i32); 14] = [
+    (0, 0, 0),
+    (0, 0, 1),
+    (2, 31, 0),
+    (2, 31, 1),
+    (4, 53, 0),
+    (4, 53, 1),
+    (1, 18, 0),
+    (1, 18, 1),
+    (0, 10, 0),
+    (0, 10, 1),
+    (3, 44, 0),
+    (3, 44, 1),
+    (3, 49, 0),
+    (3, 49, 1),
 ];
 const ENCRYPTED_PACKAGES: [&str; 2] = ["l2killer_headgear", "l2killer_assassin_light"];
 const GRIP_RADIUS: f32 = 3.0;
@@ -90,7 +106,7 @@ impl Report {
 
 fn player<'a>(tables: &'a DatTables, row: usize, hair_style: i32, equipped: Equipped) -> Player<'a> {
     Player {
-        template: &tables.chargrp[row],
+        look: CharLook::Classic(&tables.chargrp[row]),
         row,
         face: 0,
         hair_style,
@@ -307,7 +323,7 @@ fn every_weapon_mesh_attaches_to_its_bone_with_a_coherent_orientation() {
                 report.count("ex-meshes (varas/draconic)");
             }
             let Some(mesh) = load(&mut client, part, &mut report) else { continue };
-            let key = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
+            let key = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
             let Some(character) = character(&mut client, &mut shared, key, &appearance) else {
                 report.code(format!("{} não montou o personagem", part.mesh));
                 continue;
@@ -509,7 +525,8 @@ fn every_hair_style_and_head_accessory_lands_on_the_head() {
                     }
                     continue;
                 }
-                let key = AppearanceKey::Player { row, face: 0, hair_style: style, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
+                let (race, class_id, sex) = CLASS_ROW_IDENTITY[row];
+                let key = AppearanceKey::Player { race, class_id, sex, face: 0, hair_style: style, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
                 let Some(mut character) = character(&mut client, &mut shared, key, &appearance) else {
                     report.code(format!("{}: não montou", part.mesh));
                     continue;
@@ -562,7 +579,7 @@ fn the_beret_sits_on_the_dwarf_head() {
     let helm = appearance.part(SLOT_HELM).expect("boina no slot 6");
     assert_eq!(helm.mesh, "L2killer_Helmet_UN.MW_viRUS_Beret_1_m002_a");
     assert_eq!(helm.placement, Placement::Helm { offset: [0.0; 3], rotation: [0; 3] });
-    let key = AppearanceKey::Player { row: 4, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
+    let key = AppearanceKey::Player { race: 4, class_id: 53, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
     let mut character = character(&mut client, &mut shared, key, &appearance).unwrap();
     let helm_index = character.parts().iter().position(|(_, m)| m.slot == SLOT_HELM).unwrap();
     let Some(PartKind::Attached { bone: Some(head), .. }) = character.kind(helm_index) else { panic!("sem cabeça") };

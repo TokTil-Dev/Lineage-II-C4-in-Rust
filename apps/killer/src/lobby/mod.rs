@@ -55,6 +55,13 @@ use std::time::Instant;
 use ue2_level::BspTree;
 
 pub const LOBBY_MAP: &str = "lobby";
+
+pub fn lobby_map(chronicle: l2_dat::Chronicle) -> &'static str {
+    match chronicle {
+        l2_dat::Chronicle::HighFive => "lobby01",
+        _ => LOBBY_MAP,
+    }
+}
 pub const NEW_CHARACTER_FAIL_SYSMSG: u32 = 128;
 pub const DELETE_FAIL_SYSMSGS: [u32; 3] = [306, 541, 540];
 pub const VOICE_CHAR_START: &str = "SystemMsg_e.char_start";
@@ -247,7 +254,8 @@ pub fn load_lobby(
         Vec::new()
     });
     lap("tabelas do lobby");
-    let path = match client.level_path(LOBBY_MAP) {
+    let lobby_name = lobby_map(client.chronicle());
+    let path = match client.level_path(lobby_name) {
         Ok(path) => path,
         Err(e) => {
             send_part(tx, Err(e.to_string()));
@@ -265,7 +273,7 @@ pub fn load_lobby(
     let cache = SceneCache::default_dir();
     let cached = cache.as_ref().and_then(|cache| cache.read(&path, &stamp));
     lap(&format!("cache da cena ({})", if cached.is_some() { "acertou" } else { "ausente" }));
-    let loaded = match client.parse_level(LOBBY_MAP, &path, &raw) {
+    let loaded = match client.parse_level(lobby_name, &path, &raw) {
         Ok(loaded) => loaded,
         Err(e) => {
             send_part(tx, Err(e.to_string()));
@@ -1463,7 +1471,6 @@ mod client_tests {
     use killer_assets::animation::sequence_index;
     use killer_assets::cache::CachedScene;
     use killer_assets::scene::Vertex;
-    use l2_dat::chargrp::index_for;
     use std::path::PathBuf;
 
     #[test]
@@ -1551,9 +1558,10 @@ mod client_tests {
         let table = client.logongrp().unwrap();
         let mut shared = Shared::default();
         for model in stage_models(&table) {
-            let row = index_for(model.race, model.sex, model.class_id).unwrap();
             let key = AppearanceKey::Player {
-                row,
+                race: model.race,
+                class_id: model.class_id,
+                sex: model.sex,
                 face: 0,
                 hair_style: 0,
                 hair_color: 0,

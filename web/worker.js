@@ -223,6 +223,7 @@ async function start(data) {
         client.enable_background_loading();
         if (data.mode==='demo') {
             status('Carregando prévia de Giran…');
+            if (data.crowd) client.set_demo_crowd(data.crowd,Boolean(data.varied));
             let prepared;
             try {prepared=await preparation.run('22_22',client.settings());}
             catch (error) {postMessage({type:'warning',text:`Cache indisponível: ${error.message}`});}

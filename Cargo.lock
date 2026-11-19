@@ -2824,9 +2824,12 @@ dependencies = [
  "killer-render",
  "killer-ui",
  "killer-world",
+ "l2-catalog",
  "l2-crypto",
  "l2-dat",
  "l2-net",
+ "l2-uscript",
+ "l2-xdat",
  "log",
  "pollster",
  "rodio",
@@ -2953,6 +2956,7 @@ dependencies = [
  "jiff",
  "js-sys",
  "wasm-bindgen",
+ "wasm-bindgen-futures",
  "web-sys",
  "web-time",
 ]
@@ -2984,6 +2988,7 @@ dependencies = [
  "glam",
  "killer-font",
  "l2-dat",
+ "l2-xdat",
  "serde_json",
 ]
 
@@ -3002,8 +3007,12 @@ dependencies = [
  "killer-render",
  "killer-ui",
  "killer-world",
+ "l2-catalog",
+ "l2-crypto",
  "l2-dat",
  "l2-net",
+ "l2-uscript",
+ "l2-xdat",
  "log",
  "lz4_flex",
  "serde_json",
@@ -3047,6 +3056,7 @@ dependencies = [
 name = "l2-catalog"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "killer-platform",
  "l2-crypto",
  "ue2-assets",
@@ -3066,6 +3076,7 @@ dependencies = [
 name = "l2-dat"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "l2-crypto",
  "thiserror 2.0.20",
  "ue2-core",
@@ -3077,7 +3088,26 @@ version = "0.1.0"
 dependencies = [
  "blowfish",
  "cipher",
+ "l2-dat",
+ "num-bigint",
  "thiserror 2.0.20",
+]
+
+[[package]]
+name = "l2-uscript"
+version = "0.1.0"
+dependencies = [
+ "ue2-core",
+ "ue2-package",
+]
+
+[[package]]
+name = "l2-xdat"
+version = "0.1.0"
+dependencies = [
+ "l2-crypto",
+ "thiserror 2.0.20",
+ "ue2-core",
 ]
 
 [[package]]

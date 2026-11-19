@@ -55,6 +55,13 @@ pub struct WindowsInfo {
     pub widths: HashMap<u32, i32>,
     pub chat_height: Option<i32>,
     pub shortcut_rotate: Option<bool>,
+    pub named: HashMap<String, SavedWindow>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct SavedWindow {
+    pub position: Option<(i32, i32)>,
+    pub size: Option<(i32, i32)>,
 }
 
 impl WindowsInfo {
@@ -74,12 +81,21 @@ impl WindowsInfo {
             .filter_map(|name| name.parse::<u32>().ok())
             .filter_map(|id| Some((id, ini.int(&id.to_string(), "width")?)))
             .collect();
-        WindowsInfo {
-            positions,
-            widths,
-            chat_height: ini.int(&WindowId::CHAT.0.to_string(), "Height"),
-            shortcut_rotate: ini.bool(&WindowId::SHORTCUT.0.to_string(), "rotate"),
-        }
+        let named = ini
+            .0
+            .keys()
+            .filter(|name| name.parse::<u32>().is_err())
+            .map(|name| {
+                let position = ini.int(name, "posX").zip(ini.int(name, "posY"));
+                let size = ini.int(name, "width").zip(ini.int(name, "height"));
+                (name.clone(), SavedWindow { position, size })
+            })
+            .collect();
+        WindowsInfo { positions, widths, chat_height: ini.int(&WindowId::CHAT.0.to_string(), "Height"), shortcut_rotate: ini.bool(&WindowId::SHORTCUT.0.to_string(), "rotate"), named }
+    }
+
+    pub fn saved(&self, name: &str) -> SavedWindow {
+        self.named.get(name).copied().unwrap_or_default()
     }
 
     pub fn position(&self, id: WindowId) -> Option<(i32, i32)> {

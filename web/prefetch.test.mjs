@@ -102,3 +102,20 @@ test('stale cache entries are all removed and counted',async()=>{
     assert.equal(removed,2);
     assert.deepEqual(deleted.sort(),[gone,stale].sort());
 });
+
+test('arquivo acima do limite fica remoto até já estar no cache',async()=>{
+    const wanted=new Set(['system/a.ini','sounds/big.ogg']);
+    const cache=memoryCache();
+    const log=[];
+    const first=await prefetch(entries,wanted,{cache,fetcher:fetcher(log),limitBytes:4});
+    assert.deepEqual(first.failures,[]);
+    assert.ok(first.files[0][1] instanceof File);
+    assert.equal(first.files[2][1].url,'https://cdn.test/Sounds/big.ogg');
+    assert.deepEqual(log,['https://cdn.test/system/A.ini']);
+    assert.equal(first.bytes,3);
+    await prefetch(entries,wanted,{cache,fetcher:fetcher([])});
+    const again=[];
+    const second=await prefetch(entries,wanted,{cache,fetcher:fetcher(again),limitBytes:4});
+    assert.ok(second.files[2][1] instanceof File);
+    assert.deepEqual(again,[]);
+});

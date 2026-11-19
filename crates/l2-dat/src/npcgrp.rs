@@ -32,16 +32,23 @@ pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<Npc>, Err
     match chronicle {
         crate::Chronicle::C4 => read(body),
         crate::Chronicle::Interlude => read_interlude(body),
+        crate::Chronicle::HighFive => read_high_five(body),
     }
 }
 
 pub fn read_interlude(body: &[u8]) -> Result<Vec<Npc>, Error> {
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;
-    (0..count).map(|_| record_interlude(&mut reader)).collect()
+    (0..count).map(|_| record_interlude(&mut reader, false)).collect()
 }
 
-fn record_interlude(r: &mut DatReader<'_>) -> Result<Npc, Error> {
+pub fn read_high_five(body: &[u8]) -> Result<Vec<Npc>, Error> {
+    let mut reader = DatReader::new(body);
+    let count = reader.u32()?;
+    (0..count).map(|_| record_interlude(&mut reader, true)).collect()
+}
+
+fn record_interlude(r: &mut DatReader<'_>, high_five: bool) -> Result<Npc, Error> {
     let id = r.u32()?;
     let class = r.unicode()?;
     let mesh = r.unicode()?;
@@ -59,6 +66,9 @@ fn record_interlude(r: &mut DatReader<'_>) -> Result<Npc, Error> {
         r.f32()?;
     }
     skip_counted_u32s(r)?;
+    if high_five {
+        skip_counted_u32s(r)?;
+    }
     let effect = r.unicode()?;
     r.u32()?;
     let sound_radius = r.f32()?;
@@ -66,6 +76,13 @@ fn record_interlude(r: &mut DatReader<'_>) -> Result<Npc, Error> {
     let sound_random = r.f32()?;
     r.u32()?;
     let shows_bars = r.u32()?;
+    if high_five {
+        let greetings = r.u32()?;
+        for _ in 0..greetings {
+            r.ascf()?;
+        }
+        r.u32()?;
+    }
     Ok(Npc { id, class, mesh, textures, textures2, speed, effect, level_min: 0, level_max: 0, attack_sounds, defense_sounds, damage_sounds, sound_radius, sound_volume, sound_random, skills, shows_bars })
 }
 

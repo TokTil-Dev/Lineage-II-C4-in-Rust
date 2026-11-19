@@ -1,6 +1,9 @@
 use super::packets::*;
+use l2_dat::Chronicle;
 use crate::wire::WireError;
 use thiserror::Error;
+
+pub const INIT_PROTOCOL_MODERN: i32 = 0xc621;
 
 #[derive(Debug, Error)]
 pub enum LoginError {
@@ -50,6 +53,7 @@ pub enum LoginStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginPhase {
     Init,
+    GameGuard,
     LoginOk,
     Notice,
     ServerList,
@@ -65,6 +69,14 @@ pub struct LoginFlow {
     server: Option<GameServer>,
     choosing: bool,
     card: Option<(i32, i8)>,
+    modern: Option<ModernState>,
+    characters: Vec<ServerCharacters>,
+}
+
+struct ModernState {
+    session_id: i32,
+    modulus: [u8; 128],
+    session_key: Option<[u8; 16]>,
 }
 
 impl LoginFlow {
@@ -75,7 +87,7 @@ impl LoginFlow {
         if !bounded(&user, 14) || !bounded(&password, 16) {
             return Err(LoginError::Malformed("conta até 14 bytes e senha até 16, sem NUL"));
         }
-        Ok(Self { phase: LoginPhase::Init, user, password, login_key: [0; 2], server: None, choosing: false, card: None })
+        Ok(Self { phase: LoginPhase::Init, user, password, login_key: [0; 2], server: None, choosing: false, card: None, modern: None, characters: Vec::new() })
     }
 
     pub fn card_answer(&self, card_id: i32, value: i32) -> Result<Vec<u8>, LoginError> {
@@ -84,6 +96,27 @@ impl LoginFlow {
         }
         let _ = (card_id, value);
         Err(LoginError::CardUnavailable)
+    }
+
+    pub fn for_chronicle(chronicle: Chronicle, user: &str, password: &str, choosing: bool) -> Result<Self, LoginError> {
+        let mut flow = Self::new(user, password)?;
+        flow.choosing = choosing;
+        if chronicle == Chronicle::HighFive {
+            flow.modern = Some(ModernState { session_id: 0, modulus: [0; 128], session_key: None });
+        }
+        Ok(flow)
+    }
+
+    pub fn is_modern(&self) -> bool {
+        self.modern.is_some()
+    }
+
+    pub fn take_session_key(&mut self) -> Option<[u8; 16]> {
+        self.modern.as_mut().and_then(|state| state.session_key.take())
+    }
+
+    pub fn characters(&self) -> &[ServerCharacters] {
+        &self.characters
     }
 
     pub fn choosing(user: &str, password: &str) -> Result<Self, LoginError> {
@@ -163,6 +196,30 @@ impl LoginFlow {
             return Ok(LoginStep::CardCheck { card_id, position, retry: false });
         }
         match (self.phase, opcode) {
+            (LoginPhase::Init, OP_INIT) if self.modern.is_some() => {
+                let init = read_init_modern(body).ok_or(LoginError::Malformed("Init cifrado curto ou malformado"))?;
+                if init.protocol != INIT_PROTOCOL_MODERN {
+                    return Err(LoginError::Malformed("protocolo do Init diferente de 0xc621"));
+                }
+                self.modern = Some(ModernState {
+                    session_id: init.session_id,
+                    modulus: init.modulus,
+                    session_key: Some(init.blowfish_key),
+                });
+                self.phase = LoginPhase::GameGuard;
+                Ok(LoginStep::Send(request_auth_game_guard(init.session_id, &init.guard)))
+            }
+            (LoginPhase::GameGuard, OP_GAME_GUARD_AUTH) => {
+                let state = self.modern.as_ref().ok_or(LoginError::Phase)?;
+                if read_game_guard_auth(body)? != state.session_id {
+                    return Err(LoginError::Malformed("GGAuth com session id diferente do Init"));
+                }
+                let reply = request_auth_login_modern(&state.modulus, &self.user, &self.password, state.session_id)
+                    .ok_or(LoginError::Malformed("bloco RSA não pôde ser montado"))?;
+                self.password.fill(0);
+                self.phase = LoginPhase::LoginOk;
+                Ok(LoginStep::Send(reply))
+            }
             (LoginPhase::Init, OP_INIT) => {
                 if body.len() != 9 {
                     return Err(LoginError::Malformed("Init deve ter 9 bytes"));
@@ -181,19 +238,17 @@ impl LoginFlow {
                 self.phase = LoginPhase::ServerList;
                 Ok(LoginStep::Send(request_server_list(self.login_key)))
             }
+            (LoginPhase::ServerList, OP_SERVER_LIST) | (LoginPhase::LoginOk, OP_SERVER_LIST)
+                if self.modern.is_some() =>
+            {
+                let (servers, characters) = read_server_list_modern(body)?;
+                self.characters = characters;
+                self.phase = LoginPhase::ServerList;
+                self.pick_server(servers)
+            }
             (LoginPhase::ServerList, OP_SERVER_LIST) => {
                 let servers = read_server_list(body)?;
-                if servers.is_empty() {
-                    return Err(LoginError::Malformed("lista de servidores vazia"));
-                }
-                if self.choosing {
-                    return Ok(LoginStep::Choose(servers));
-                }
-                let server = servers.into_iter().next().ok_or(LoginError::Malformed("lista de servidores vazia"))?;
-                let reply = request_server_login(self.login_key, server.id);
-                self.server = Some(server);
-                self.phase = LoginPhase::PlayOk;
-                Ok(LoginStep::Send(reply))
+                self.pick_server(servers)
             }
             (LoginPhase::PlayOk, OP_PLAY_OK) => {
                 let play_key = read_key_pair(body)?;
@@ -203,6 +258,22 @@ impl LoginFlow {
             }
             _ => Err(LoginError::Phase),
         }
+    }
+}
+
+impl LoginFlow {
+    fn pick_server(&mut self, servers: Vec<GameServer>) -> Result<LoginStep, LoginError> {
+        if servers.is_empty() {
+            return Err(LoginError::Malformed("lista de servidores vazia"));
+        }
+        if self.choosing {
+            return Ok(LoginStep::Choose(servers));
+        }
+        let server = servers.into_iter().next().ok_or(LoginError::Malformed("lista de servidores vazia"))?;
+        let reply = request_server_login(self.login_key, server.id);
+        self.server = Some(server);
+        self.phase = LoginPhase::PlayOk;
+        Ok(LoginStep::Send(reply))
     }
 }
 
@@ -229,6 +300,13 @@ mod tests {
             body.extend_from_slice(&[0, 0, 0, 0, 0]);
         }
         body
+    }
+
+    #[test]
+    fn only_high_five_uses_the_modern_login_scheme() {
+        assert!(!LoginFlow::for_chronicle(Chronicle::C4, "c", "p", false).unwrap().is_modern());
+        assert!(!LoginFlow::for_chronicle(Chronicle::Interlude, "c", "p", false).unwrap().is_modern());
+        assert!(LoginFlow::for_chronicle(Chronicle::HighFive, "c", "p", false).unwrap().is_modern());
     }
 
     #[test]

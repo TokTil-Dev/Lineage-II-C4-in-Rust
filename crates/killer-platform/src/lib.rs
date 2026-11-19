@@ -96,3 +96,58 @@ mod order_tests {
         let _ = std::fs::remove_dir_all(root);
     }
 }
+
+pub mod deferred_io {
+    pub fn set(on: bool) {
+        #[cfg(target_arch = "wasm32")]
+        crate::fs::set_deferred(on);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = on;
+    }
+
+    pub fn blocked() -> bool {
+        #[cfg(target_arch = "wasm32")]
+        { crate::fs::blocked() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { false }
+    }
+
+    pub fn take_blocked() -> bool {
+        #[cfg(target_arch = "wasm32")]
+        { crate::fs::take_blocked() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { false }
+    }
+
+    pub fn dispatch() {
+        #[cfg(target_arch = "wasm32")]
+        crate::fs::dispatch();
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub use crate::fs::Ticket;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[derive(Default)]
+    pub struct Ticket;
+
+    pub fn want_edges(file: &crate::fs::File) {
+        #[cfg(target_arch = "wasm32")]
+        crate::fs::want_edges(file);
+        #[cfg(not(target_arch = "wasm32"))]
+        let _ = file;
+    }
+
+    pub fn take_ticket() -> Ticket {
+        #[cfg(target_arch = "wasm32")]
+        { crate::fs::take_ticket() }
+        #[cfg(not(target_arch = "wasm32"))]
+        { Ticket }
+    }
+
+    pub fn ready(ticket: &Ticket) -> bool {
+        #[cfg(target_arch = "wasm32")]
+        { crate::fs::ready(ticket) }
+        #[cfg(not(target_arch = "wasm32"))]
+        { let _ = ticket; true }
+    }
+}

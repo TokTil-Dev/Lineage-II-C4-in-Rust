@@ -55,6 +55,7 @@ pub struct DatTables {
     pub npcgrp: NpcTable,
     pub rotation_rates: crate::pawn_rotation::RotationRates,
     pub chargrp: Vec<CharTemplate>,
+    pub chargrp_high_five: Vec<l2_dat::chargrp::CharRowHighFive>,
     pub hairgrp: Vec<HairRow>,
     pub helmetgrp: HashMap<u32, Vec<HairRow>>,
     pub hairaccessarygrp: HashMap<u32, Vec<HairRow>>,
@@ -155,6 +156,10 @@ impl DatTables {
         (!name.is_empty() && !name.eq_ignore_ascii_case("None")).then_some(name.as_str())
     }
 
+    pub fn char_row_high_five(&self, race: i32, sex: i32, class_id: i32) -> Option<&l2_dat::chargrp::CharRowHighFive> {
+        chargrp::index_for_high_five(&self.chargrp_high_five, race, sex, class_id).map(|index| &self.chargrp_high_five[index])
+    }
+
     pub fn items(&self) -> Items<'_> {
         Items { armors: &self.armorgrp, weapons: &self.weapongrp }
     }
@@ -187,12 +192,27 @@ pub fn set_base_root(root: PathBuf) {
     let _ = BASE_ROOT.set(root);
 }
 
-fn detect_chronicle(root: &Path) -> l2_dat::Chronicle {
-    if find_file_by_name(&root.join("system"), "interface.xdat").is_some() {
-        l2_dat::Chronicle::Interlude
-    } else {
-        l2_dat::Chronicle::C4
+const HIGH_FIVE_LICENSEE: u16 = 37;
+
+fn package_licensee(system: &Path, name: &str) -> Option<u16> {
+    let path = find_file_by_name(system, name)?;
+    let raw = fs::read(&path).ok()?;
+    let file = l2_crypto::decrypt(&raw, &path).ok()?;
+    file.get(6..8).map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+pub fn chronicle_from_evidence(licensee: Option<u16>, has_interface_xdat: bool) -> l2_dat::Chronicle {
+    match licensee {
+        Some(HIGH_FIVE_LICENSEE..) => l2_dat::Chronicle::HighFive,
+        _ if has_interface_xdat => l2_dat::Chronicle::Interlude,
+        _ => l2_dat::Chronicle::C4,
     }
+}
+
+pub fn detect_chronicle(root: &Path) -> l2_dat::Chronicle {
+    let system = root.join("system");
+    let licensee = ["Core.u", "Engine.u", "Fire.u"].iter().find_map(|name| package_licensee(&system, name));
+    chronicle_from_evidence(licensee, find_file_by_name(&system, "interface.xdat").is_some())
 }
 
 pub struct Client {
@@ -232,6 +252,17 @@ impl Client {
 
     pub fn catalog(&mut self) -> &mut Catalog {
         &mut self.catalog
+    }
+
+    pub fn begin_attempt(&mut self) {
+        self.catalog.begin_attempt();
+    }
+
+    pub fn finish_attempt(&mut self, keep: bool) {
+        self.catalog.finish_attempt(keep);
+        if !keep {
+            self.script_packages.retain(|_, loaded| loaded.is_some());
+        }
     }
 
     pub fn level_path(&self, tile: &str) -> Result<PathBuf, AssetError> {
@@ -544,7 +575,7 @@ impl Client {
     }
 
     pub fn logongrp(&mut self) -> Result<l2_dat::Logongrp, AssetError> {
-        self.table("logongrp.dat", l2_dat::logongrp::read)
+        self.table_as("logongrp.dat", l2_dat::logongrp::read_as)
     }
 
     pub fn tables(&mut self) -> Result<DatTables, AssetError> {
@@ -578,10 +609,10 @@ impl Client {
     }
 
     pub fn tables_for_language(&mut self, language: &crate::language::ClientLanguage) -> Result<DatTables, AssetError> {
-        let recipes = self.table("Recipe-c.dat", l2_dat::recipe::read)?;
+        let recipes = self.table_as("Recipe-c.dat", l2_dat::recipe::read_as)?;
         let (weapons, weapon_icons) = self.table_with_icons_as("weapongrp.dat", weapongrp::read_as, ItemKind::Weapon)?;
-        let (armors, armor_icons) = self.table_with_icons("armorgrp.dat", armorgrp::read, ItemKind::Armor)?;
-        let (etc_items, etc_icons) = self.table_with_icons("etcitemgrp.dat", etcitemgrp::read, ItemKind::Etc)?;
+        let (armors, armor_icons) = self.table_with_icons_as("armorgrp.dat", armorgrp::read_as, ItemKind::Armor)?;
+        let (etc_items, etc_icons) = self.table_with_icons_as("etcitemgrp.dat", etcitemgrp::read_as, ItemKind::Etc)?;
         let mut item_icons = ItemIcons::default();
         for icons in [etc_icons, armor_icons, weapon_icons] { item_icons.insert_all(icons); }
         self.black_texture_for_unloadable_icons(&mut item_icons);
@@ -606,28 +637,32 @@ impl Client {
         }
         let npc_names = npcname::npc_records(npcs.iter().map(|npc| npc.id), self.table(&language.table_name("npcname"), npcname::read)?);
         let rotation_rates = self.rotation_rates(&npcs);
+        let (chargrp, chargrp_high_five, hairgrp, helmetgrp, hairaccessarygrp) = if self.chronicle_of("chargrp.dat") == l2_dat::Chronicle::HighFive {
+            (Vec::new(), self.table("chargrp.dat", chargrp::read_high_five)?, Vec::new(), HashMap::new(), HashMap::new())
+        } else {
+            (
+                self.table("chargrp.dat", chargrp::read)?,
+                Vec::new(),
+                self.table("hairgrp.dat", hairgrp::read)?,
+                self.table("helmetgrp.dat", helmetgrp::read)?.into_iter().map(|h| (h.helmet_index, h.rows)).collect(),
+                self.table("hairaccessarygrp.dat", helmetgrp::read)?.into_iter().map(|h| (h.helmet_index, h.rows)).collect(),
+            )
+        };
         Ok(DatTables {
             rotation_rates,
             npcgrp: npcs,
-            chargrp: self.table("chargrp.dat", chargrp::read)?,
-            hairgrp: self.table("hairgrp.dat", hairgrp::read)?,
-            helmetgrp: self
-                .table("helmetgrp.dat", helmetgrp::read)?
-                .into_iter()
-                .map(|h| (h.helmet_index, h.rows))
-                .collect(),
-            hairaccessarygrp: self
-                .table("hairaccessarygrp.dat", helmetgrp::read)?
-                .into_iter()
-                .map(|h| (h.helmet_index, h.rows))
-                .collect(),
+            chargrp,
+            chargrp_high_five,
+            hairgrp,
+            helmetgrp,
+            hairaccessarygrp,
             accessory_locs: hairaccessorylocgrp::by_mesh(
                 self.table("hairaccessorylocgrp.dat", hairaccessorylocgrp::read)?,
             ),
             armorgrp,
             weapongrp,
             etcitemgrp,
-            skillsound: self.table("skillsoundgrp.dat", l2_dat::skillsoundgrp::read)?,
+            skillsound: self.table_as("skillsoundgrp.dat", l2_dat::skillsoundgrp::read_as)?,
             eula: self.table_as(&language.table_name("eula"), l2_dat::eula::read_as).ok(),
             warning_notice: self.table(&language.table_name("warningnotice"), l2_dat::warningnotice::read).ok(),
             credits: self.table(&language.table_name("creditgrp"), l2_dat::creditgrp::read).unwrap_or_default(),
@@ -639,9 +674,9 @@ impl Client {
             hennagrp: by_id(self.table(&language.table_name("hennagrp"), hennagrp::read)?, |h| h.symbol_id),
             recipe_order: recipes.iter().map(|r| r.id).collect(),
             recipes: recipes.into_iter().map(|r| (r.id, r)).collect(),
-            skillgrp: skillgrp::by_id_level(self.table("skillgrp.dat", skillgrp::read)?),
+            skillgrp: skillgrp::by_id_level(self.table_as("skillgrp.dat", skillgrp::read_as)?),
             zonename: self.table_as(&language.table_name("zonename"), zonename::read_as)?,
-            castlename: by_id(self.table(&language.table_name("castlename"), l2_dat::castlename::read)?, |castle| castle.id),
+            castlename: by_id(self.table_as(&language.table_name("castlename"), l2_dat::castlename::read_as)?, |castle| castle.id),
             staticobject: self.table(&language.table_name("staticobject"), l2_dat::staticobject::read)?.into_iter().map(|object| (object.id, object.name)).collect(),
             anim_names: self.anim_names()?,
             language_type: language.language_type,
@@ -666,13 +701,6 @@ impl Client {
         let body = self.read_system_file(name)?;
         let records = read(&body, self.chronicle_of(name)).map_err(|e| AssetError::Table(name.to_string(), e))?;
         let icons = itemicons::read_as(&body, kind, self.chronicle_of(name)).map_err(|e| AssetError::Table(name.to_string(), e))?;
-        Ok((records, icons))
-    }
-
-    fn table_with_icons<T>(&mut self, name: &str, read: fn(&[u8]) -> Result<Vec<T>, l2_dat::Error>, kind: ItemKind) -> Result<(Vec<T>, Vec<itemicons::ItemIcon>), AssetError> {
-        let body = self.read_system_file(name)?;
-        let records = read(&body).map_err(|e| AssetError::Table(name.to_string(), e))?;
-        let icons = itemicons::read(&body, kind).map_err(|e| AssetError::Table(name.to_string(), e))?;
         Ok((records, icons))
     }
 
@@ -744,17 +772,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_package_licensee_tells_high_five_from_interlude_and_c4() {
+        assert_eq!(chronicle_from_evidence(Some(37), true), l2_dat::Chronicle::HighFive);
+        assert_eq!(chronicle_from_evidence(Some(30), true), l2_dat::Chronicle::Interlude);
+        assert_eq!(chronicle_from_evidence(Some(27), false), l2_dat::Chronicle::C4);
+        assert_eq!(chronicle_from_evidence(None, true), l2_dat::Chronicle::Interlude);
+        assert_eq!(chronicle_from_evidence(None, false), l2_dat::Chronicle::C4);
+    }
+
+    #[test]
     #[ignore]
     fn shared_item_bytes_preserve_every_original_record_and_icon() {
-        fn verify<T: PartialEq>(client: &mut Client, name: &str, read: fn(&[u8]) -> Result<Vec<T>, l2_dat::Error>, kind: ItemKind) {
-            let (records, icons) = client.table_with_icons(name, read, kind).unwrap();
+        fn verify<T: PartialEq>(client: &mut Client, name: &str, read: fn(&[u8], l2_dat::Chronicle) -> Result<Vec<T>, l2_dat::Error>, kind: ItemKind) {
+            let chronicle = client.chronicle_of(name);
+            let (records, icons) = client.table_with_icons_as(name, read, kind).unwrap();
             let original = client.read_system_file(name).unwrap();
-            let expected = read(&original).unwrap();
+            let expected = read(&original, chronicle).unwrap();
             assert_eq!(records.len(), expected.len(), "{name}");
             for (index, (actual, expected)) in records.iter().zip(&expected).enumerate() {
                 assert!(actual == expected, "{name}: registro {index}");
             }
-            let expected_icons = itemicons::read(&original, kind).unwrap();
+            let expected_icons = itemicons::read_as(&original, kind, chronicle).unwrap();
             assert_eq!(icons.len(), expected_icons.len(), "{name}");
             for (index, (actual, expected)) in icons.iter().zip(&expected_icons).enumerate() {
                 assert!(actual == expected, "{name}: ícone {index}");
@@ -762,9 +800,9 @@ mod tests {
         }
         let root = PathBuf::from(std::env::var_os("KILLER_CLIENT_DIR").expect("KILLER_CLIENT_DIR"));
         let mut client = Client::open(&root).unwrap();
-        verify(&mut client, "weapongrp.dat", weapongrp::read, ItemKind::Weapon);
-        verify(&mut client, "armorgrp.dat", armorgrp::read, ItemKind::Armor);
-        verify(&mut client, "etcitemgrp.dat", etcitemgrp::read, ItemKind::Etc);
+        verify(&mut client, "weapongrp.dat", weapongrp::read_as, ItemKind::Weapon);
+        verify(&mut client, "armorgrp.dat", armorgrp::read_as, ItemKind::Armor);
+        verify(&mut client, "etcitemgrp.dat", etcitemgrp::read_as, ItemKind::Etc);
     }
 
     #[test]

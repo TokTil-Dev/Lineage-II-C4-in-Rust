@@ -62,6 +62,23 @@ fn spot(r: &mut DatReader<'_>) -> Result<Spot, Error> {
     Ok(Spot { x: r.f32()?, y: r.f32()?, z: r.f32()?, yaw: r.f32()? })
 }
 
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Logongrp, Error> {
+    match chronicle {
+        crate::Chronicle::C4 | crate::Chronicle::Interlude => read(body),
+        crate::Chronicle::HighFive => read_high_five(body),
+    }
+}
+
+pub fn read_high_five(body: &[u8]) -> Result<Logongrp, Error> {
+    let mut r = DatReader::new(body);
+    let mut slots = [Spot::default(); SELECT_SLOTS];
+    for slot in &mut slots {
+        *slot = spot(&mut r)?;
+    }
+    let center = spot(&mut r)?;
+    Ok(Logongrp { slots, center, stage: [Spot::default(); STAGE_SLOTS] })
+}
+
 pub fn read(body: &[u8]) -> Result<Logongrp, Error> {
     let mut r = DatReader::new(body);
     let mut slots = [Spot::default(); SELECT_SLOTS];

@@ -40,7 +40,7 @@ use killer_world::chat::CHAT_SYSTEM;
 const CONNECTION_LOST_SYSMSG: u32 = 0;
 const PROTOCOL_QUIT_SYSMSG: u32 = 88;
 use killer_world::{
-    ChatLine, ChatLog, NetCommand, NetEvent, NetHandle, SessionEvent, World, WorldEvent, spawn_choosing,
+    ChatLine, ChatLog, NetCommand, NetEvent, NetHandle, SessionEvent, World, WorldEvent, spawn_choosing_for,
 };
 use l2_net::game::SystemMessage;
 use std::collections::HashMap;
@@ -73,7 +73,7 @@ pub fn next_screen(current: Screen, event: &NetEvent) -> Screen {
         NetEvent::ServerList(_) => Screen::Servers,
         NetEvent::Session(SessionEvent::Characters(_)) => Screen::Characters,
         NetEvent::Session(SessionEvent::RestartResponse(_)) => Screen::Characters,
-        NetEvent::Session(SessionEvent::UserInfo(_)) => Screen::World,
+        NetEvent::Session(SessionEvent::UserInfo(_) | SessionEvent::UserInfoHighFive { .. }) => Screen::World,
         NetEvent::Session(
             SessionEvent::Selected
             | SessionEvent::World(_)
@@ -283,6 +283,8 @@ pub struct App {
     material_clock: Instant,
     fps: f32,
     screenshot: Option<PathBuf>,
+    interface: Option<crate::lobby_h5::InterfaceKind>,
+    hud_h5: Option<crate::hud_h5::H5Hud>,
     capture: Option<PathBuf>,
     frames_ready: u32,
     ignored: IgnoredOpcodes,
@@ -334,6 +336,7 @@ pub struct App {
     radar_toggle: bool,
     binds: killer_world::engine_input::KeyBinds,
     modern_hud: crate::ui_modern::ModernHud,
+    interlude_hud: bool,
     ui_captured: bool,
     hud: HudMode,
     lobby_demo: Option<LobbyDemo>,
@@ -446,6 +449,8 @@ impl App {
             material_clock: Instant::now(),
             fps: 0.0,
             screenshot,
+            interface: None,
+            hud_h5: None,
             capture: None,
             frames_ready: 0,
             ignored: IgnoredOpcodes::new(Instant::now()),
@@ -497,6 +502,7 @@ impl App {
             radar_toggle: false,
             binds: killer_world::engine_input::KeyBinds::default(),
             modern_hud: crate::ui_modern::ModernHud::default(),
+            interlude_hud: false,
             ui_captured: false,
             hud: HudMode::default(),
             lobby_demo,
@@ -539,7 +545,9 @@ impl App {
 
     fn connect(&mut self, config: ServerConfig, account: String, password: String) {
         self.last_login = Some((config.clone(), account.clone(), password.clone()));
-        self.net = Some(spawn_choosing(config.host, config.port, account, password, true));
+        let chronicle =
+            l2_dat::Chronicle::forced().unwrap_or_else(|| killer_assets::client::detect_chronicle(&self.client_root));
+        self.net = Some(spawn_choosing_for(chronicle, config.host, config.port, account, password, true));
     }
 
     fn begin_server_transfer(&mut self, id: i32) {
@@ -687,6 +695,7 @@ impl App {
                         self.ui_bank.insert_shared(&path, data);
                     }
                 }
+                ui.enable_interlude_hud(self.interlude_hud);
                 self.game_ui = Some(ui);
                 self.ui_error = None;
             }
@@ -1023,12 +1032,15 @@ impl App {
                 }
                 NetEvent::Session(SessionEvent::Selected) => self.lobby.status = "entrando…".to_string(),
                 NetEvent::Session(event @ SessionEvent::Time(_)) => self.world.apply(&event),
-                NetEvent::Session(event @ SessionEvent::UserInfo(_)) => {
+                NetEvent::Session(event @ (SessionEvent::UserInfo(_) | SessionEvent::UserInfoHighFive { .. })) => {
                     self.world.apply(&event);
                     if let Some(me) = &self.world.me {
                         self.place(me.object_id);
                     }
                     self.follow_tile();
+                    if let Some(ui) = self.game_ui.as_mut() {
+                        ui.interlude_event(180, "");
+                    }
                 }
                 NetEvent::Session(SessionEvent::CharCreateFailed(reason)) => self.lobby.create_failed(reason),
                 NetEvent::Session(SessionEvent::CharDeleteFailed(reason)) => self.lobby.delete_failed(reason),
@@ -1046,6 +1058,7 @@ impl App {
                     log_session_lists(&event);
                     let teleported = matches!(&event, WorldEvent::TeleportToLocation(t) if self.world.me.as_ref().is_some_and(|me| me.object_id == t.target_id));
                     self.world.apply_world(&event);
+                    self.script_bridge(&event);
                     let deferred = self.world.teleport_announce;
                     if let WorldEvent::TeleportToLocation(t) = &event
                         && !deferred
@@ -1181,6 +1194,16 @@ impl App {
             && let Err(error) = host.play_interface_sound(client, name)
         {
             log::warn!("áudio: {name}: {error}");
+        }
+    }
+
+    fn script_bridge(&mut self, event: &WorldEvent) {
+        let Some(ui) = self.game_ui.as_mut() else { return };
+        if let Some(interlude) = ui.interlude.as_mut().filter(|interlude| interlude.enabled) {
+            interlude.sync(&self.world);
+        }
+        for (id, param) in crate::interlude_script::events::bridge(event, &self.world, self.tables.as_deref()) {
+            ui.interlude_event(id, &param);
         }
     }
 
@@ -1914,7 +1937,9 @@ impl App {
             ui_keys::demo_fill(&mut self.world);
             if let Some(ui) = self.game_ui.as_mut() {
                 let windows = std::env::var("KILLER_DEMO_WINDOWS").unwrap_or_default();
-                ui.keys.open_demo_windows(&mut ui.desktop, &windows);
+                if !self.interlude_hud || windows.split(',').map(str::trim).any(|name| name == "inventory") {
+                    ui.keys.open_demo_windows(&mut ui.desktop, &windows);
+                }
                 for window in windows.split(',').map(str::trim) {
                     if matches!(window, "shop" | "sell") {
                         ui.shop_event(&crate::ui_shop::ShopWindow::demo_event(window == "sell"), self.tables.as_deref());
@@ -2699,7 +2724,158 @@ impl App {
         }
     }
 
+    fn h5_action(&mut self, action: crate::hud_h5::HudAction) -> KeyAction {
+        use crate::hud_h5::HudAction;
+        match action {
+            HudAction::SelfTarget => match self.world.me.as_ref().map(|me| me.object_id) {
+                Some(object_id) => KeyAction::Select(object_id),
+                None => KeyAction::Consumed,
+            },
+            HudAction::CancelTarget => {
+                self.send(NetCommand::TargetCancel);
+                KeyAction::Consumed
+            }
+            HudAction::Say { text, kind, target } => {
+                self.send(NetCommand::Say { text, kind, target });
+                KeyAction::Consumed
+            }
+            HudAction::UseShortcut(slot) => {
+                self.use_h5_shortcut(slot);
+                KeyAction::Consumed
+            }
+            HudAction::UseItem(object_id) => {
+                if let Some(ui) = self.game_ui.as_mut() {
+                    ui.keys.use_shortcut_item(&self.world, object_id);
+                }
+                KeyAction::Consumed
+            }
+            HudAction::UnequipPaperdoll(slot) => {
+                if let Some(ui) = self.game_ui.as_mut() {
+                    ui.keys.unequip_paperdoll_slot(slot);
+                }
+                KeyAction::Consumed
+            }
+            HudAction::Restart => {
+                self.send(NetCommand::Restart);
+                KeyAction::Consumed
+            }
+            HudAction::Quit => {
+                self.leave();
+                KeyAction::Consumed
+            }
+        }
+    }
+
+    fn use_h5_shortcut(&mut self, slot: i32) {
+        use l2_net::game::ShortcutKind;
+        let Some(shortcut) = self.world.shortcut(slot).copied() else {
+            log::info!("atalho {slot}: nenhum registro em world.shortcuts");
+            return;
+        };
+        log::info!("atalho {slot}: {:?}", shortcut.kind);
+        let (ctrl, shift) = self.hud_h5.as_ref().map_or((false, false), crate::hud_h5::H5Hud::modifiers);
+        match shortcut.kind {
+            ShortcutKind::Item { object_id } if shortcut.character_type == crate::hud_h5::SHORTCUT_OWNER_PET => self.send(NetCommand::PetUseItem { object_id }),
+            ShortcutKind::Item { object_id } => {
+                if let Some(ui) = self.game_ui.as_mut() {
+                    ui.keys.use_shortcut_item(&self.world, object_id);
+                }
+            }
+            ShortcutKind::Skill { skill_id, .. } => self.send(NetCommand::UseSkill { skill_id, ctrl, shift }),
+            ShortcutKind::Action { id } => {
+                if let Some(ui) = self.game_ui.as_mut() {
+                    ui.keys.use_action(&self.world, id, ctrl, shift);
+                }
+            }
+            ShortcutKind::Macro { id } => {
+                if let Some(ui) = self.game_ui.as_mut() {
+                    ui.keys.run_macro(&self.world, id);
+                }
+            }
+            ShortcutKind::Recipe { id } => self.send(NetCommand::RecipeItemMakeInfo { recipe_id: id }),
+            ShortcutKind::Other { kind } => log::warn!("HUD H5: atalho {slot} do tipo {kind} desconhecido"),
+        }
+    }
+
+    fn h5_event(&mut self, event: &WindowEvent) -> KeyAction {
+        let in_world = self.screen == Screen::World && self.world_view.is_some();
+        if !in_world || self.hud_h5.is_none() {
+            return KeyAction::Ignored;
+        }
+        let consumed = |yes: bool| if yes { KeyAction::Consumed } else { KeyAction::Ignored };
+        let Some(hud) = self.hud_h5.as_mut() else { return KeyAction::Ignored };
+        match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                let scale = f64::from(self.ui_scale.max(0.01));
+                let cursor = ((position.x / scale) as f32, (position.y / scale) as f32);
+                self.cursor = Some(cursor);
+                consumed(hud.mouse_move(cursor.0 as i32, cursor.1 as i32))
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                let Some((x, y)) = self.cursor else { return KeyAction::Ignored };
+                if !hud.mouse_down(x as i32, y as i32) {
+                    return KeyAction::Ignored;
+                }
+                self.ui_captured = true;
+                self.click.cancel();
+                KeyAction::Consumed
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                let Some((x, y)) = self.cursor else { return KeyAction::Ignored };
+                let captured = std::mem::take(&mut self.ui_captured);
+                let (covered, action) = hud.mouse_up(x as i32, y as i32);
+                match action {
+                    Some(action) => self.h5_action(action),
+                    None => consumed(covered || captured),
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let Some((x, y)) = self.cursor else { return KeyAction::Ignored };
+                let ticks = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => *y,
+                    MouseScrollDelta::PixelDelta(p) => p.y as f32 / 40.0,
+                };
+                consumed(hud.wheel(x as i32, y as i32, ticks))
+            }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let state = modifiers.state();
+                hud.set_modifiers(state.alt_key(), state.control_key(), state.shift_key());
+                KeyAction::Ignored
+            }
+            WindowEvent::KeyboardInput { event: KeyEvent { physical_key: PhysicalKey::Code(code), logical_key, state, repeat, .. }, .. } => {
+                let pressed = state.is_pressed();
+                if hud.chat_focused() || hud.dialog_open() {
+                    let mut action = None;
+                    if pressed {
+                        for key in ui2d::input_keys(logical_key) {
+                            action = hud.input(key).or(action);
+                        }
+                    }
+                    self.moves = Movement::default();
+                    return match action {
+                        Some(action) => self.h5_action(action),
+                        None => KeyAction::Consumed,
+                    };
+                }
+                let Some(vk) = ui_keys::virtual_key(*code) else { return KeyAction::Ignored };
+                let (outcome, action) = hud.hotkey(vk, pressed, *repeat);
+                match (outcome, action) {
+                    (_, Some(action)) => self.h5_action(action),
+                    (crate::hud_h5::KeyOutcome::Consumed, None) => {
+                        self.moves = Movement::default();
+                        KeyAction::Consumed
+                    }
+                    _ => KeyAction::Ignored,
+                }
+            }
+            _ => KeyAction::Ignored,
+        }
+    }
+
     fn game_ui_event(&mut self, event: &WindowEvent) -> KeyAction {
+        if self.interface == Some(crate::lobby_h5::InterfaceKind::Xdat) {
+            return self.h5_event(event);
+        }
         let in_world = self.screen == Screen::World && self.world_view.is_some();
         let Some(ui) = self.game_ui.as_mut().filter(|_| in_world) else {
             return KeyAction::Ignored;
@@ -2825,6 +3001,11 @@ impl App {
 
     fn lobby_c4_active(&self) -> bool {
         Self::c4_ready(self.screen, self.modern_hud.preferences.enabled, self.tables.is_some(), self.game_ui.is_some(), self.lobby.view.is_some())
+            && !self.h5_egui_lobby()
+    }
+
+    fn h5_egui_lobby(&self) -> bool {
+        self.interface == Some(crate::lobby_h5::InterfaceKind::Xdat)
     }
 
     fn splash_finished(&self) -> bool {
@@ -3113,6 +3294,14 @@ impl App {
                 }
                 UiCommand::Log(message) => log::info!("{message}"),
                 UiCommand::InterfaceSound(name) => self.play_interface_sound(name),
+                UiCommand::InterfaceSoundNamed(name) => self.play_interface_sound(&name),
+                UiCommand::ScriptChat(typed) => self.say(typed),
+                UiCommand::ScriptTarget(object_id) => self.select_target(object_id),
+                UiCommand::ScriptCommand(line) => {
+                    if let Some(ui) = self.game_ui.as_mut() {
+                        ui.keys.chat_command(&self.world, &line);
+                    }
+                }
                 UiCommand::SystemMessage(id) => {
                     let text = ui2d::system_text(self.tables.as_deref(), id, &[]);
                     self.chat.push(ChatLine::new(CHAT_SYSTEM, String::new(), text));
@@ -3377,7 +3566,12 @@ impl App {
     }
 
     pub fn configure_hud(&mut self, style: Option<&str>) {
-        self.modern_hud.configure(style);
+        self.interlude_hud = style == Some("interlude") && l2_dat::Chronicle::forced() == Some(l2_dat::Chronicle::Interlude);
+        if style == Some("interlude") && !self.interlude_hud {
+            log::warn!("--hud interlude só vale com --chronicle interlude; seguindo com o HUD salvo");
+        }
+        self.modern_hud.configure(if self.interlude_hud { None } else { style });
+        if self.interlude_hud { self.modern_hud.preferences.enabled = false; }
         if self.modern_hud.preferences.enabled { self.hud=HudMode::Hidden; }
     }
 
@@ -3582,9 +3776,51 @@ impl App {
         if let Some(ui) = self.game_ui.as_mut() {
             ui.desktop.raise_newly_shown();
         }
-        let lobby_c4 = Self::c4_ready(self.screen, self.modern_hud.preferences.enabled, self.tables.is_some(), self.game_ui.is_some(), self.lobby.view.is_some());
         stage.renderer.set_radar(Vec::new());
+        let root = &self.client_root;
+        let xdat_interface = *self.interface.get_or_insert_with(|| {
+            crate::lobby_h5::InterfaceKind::for_chronicle(l2_dat::Chronicle::forced().unwrap_or_else(|| killer_assets::client::detect_chronicle(root)))
+        }) == crate::lobby_h5::InterfaceKind::Xdat;
+        let lobby_c4 = Self::c4_ready(self.screen, self.modern_hud.preferences.enabled, self.tables.is_some(), self.game_ui.is_some(), self.lobby.view.is_some())
+            && !xdat_interface;
         match (in_world, &self.game_ui) {
+            (_, Some(ui)) if xdat_interface && (in_world || self.screen == Screen::World) => {
+                match open_uploader(&mut self.uploader, &self.client_root) {
+                    Ok(client) => {
+                        if self.hud_h5.is_none() {
+                            match client.read_system_file("interface.xdat").map_err(|e| e.to_string()).and_then(|body| l2_dat::xdat::read_interface(&body).map_err(|e| e.to_string())) {
+                                Ok(interface) => self.hud_h5 = Some(crate::hud_h5::H5Hud::new(interface)),
+                                Err(e) => log::error!("interface.xdat: {e}"),
+                            }
+                        }
+                        match self.hud_h5.as_mut() {
+                            Some(hud) => {
+                                let catalog = client.catalog();
+                                hud.prime(&mut |name| catalog.texture_size(name).map(|size| (size[0] as i32, size[1] as i32)));
+                                let lines: Vec<killer_world::chat::ChatLine> = self.chat.iter().cloned().collect();
+                                let empty = HashMap::new();
+                                let sysstrings = self.tables.as_ref().map_or(&empty, |tables| &tables.sysstring);
+                                let sysstring = |id: u32| sysstrings.get(&id).cloned();
+                                let abnormal = ui2d::abnormal_view(&self.world, self.tables.as_deref(), Instant::now());
+                                let view = crate::hud_h5::HudView {
+                                    world: &self.world,
+                                    tables: self.tables.as_deref(),
+                                    chat: &lines,
+                                    size: (ui_space.0 as i32, ui_space.1 as i32),
+                                    font: &ui.small,
+                                    sysstring: &sysstring,
+                                    inventory: Some(&ui.keys.inventory),
+                                    abnormal: Some(&abnormal),
+                                };
+                                let list = hud.paint(&view);
+                                stage.renderer.set_ui(&list, &mut BankSource { bank: &mut self.ui_bank, catalog });
+                            }
+                            None => stage.renderer.clear_ui(),
+                        }
+                    }
+                    Err(e) => log::error!("cliente: {e}"),
+                }
+            }
             (true, Some(ui)) if self.pending.is_some() => {
                 match open_uploader(&mut self.uploader, &self.client_root) {
                     Ok(client) => stage.renderer.set_ui(&ui.loading_frame(), &mut BankSource { bank: &mut self.ui_bank, catalog: client.catalog() }),
@@ -3666,6 +3902,23 @@ impl App {
                             .unwrap_or_else(|| parse_ini(""));
                         c4.set_ping_cache(crate::ping_cache::PingCache::from_ini(&ini, crate::ping_cache::now_key()));
                     }
+                    if created
+                        && let Ok(client) = open_uploader(&mut self.uploader, &self.client_root)
+                        && client.chronicle() == l2_dat::Chronicle::HighFive
+                    {
+                        match client.read_system_file("interface.xdat").map_err(|e| e.to_string()).and_then(|body| l2_dat::xdat::read_interface(&body).map_err(|e| e.to_string())) {
+                            Ok(interface) => c4.enable_h5(interface),
+                            Err(e) => log::error!("interface.xdat: {e}"),
+                        }
+                    }
+                    if c4.h5_mut().is_some()
+                        && let Ok(client) = open_uploader(&mut self.uploader, &self.client_root)
+                    {
+                        let catalog = client.catalog();
+                        if let Some(h5) = c4.h5_mut() {
+                            h5.prime(&mut |name| catalog.texture_size(name).map(|size| (size[0] as i32, size[1] as i32)));
+                        }
+                    }
                     c4.resize(ui_size);
                     c4.update(&mut self.lobby, (dt * 1000.0) as u32);
                     if c4.needs_credit_font() {
@@ -3716,7 +3969,9 @@ impl App {
                     let slots = self.lobby.slots(ui_space, 1.0);
                     let tags = c4.name_tags(&self.lobby, &slots);
                     let mut list = c4.frame(&self.lobby, &ui.small, &tags);
-                    if let Some(window) = ui.desktop.window(killer_ui::window::WindowId::OPTION).filter(|window| window.visible) {
+                    if !xdat_interface
+                        && let Some(window) = ui.desktop.window(killer_ui::window::WindowId::OPTION).filter(|window| window.visible)
+                    {
                         ui.paint_window(&mut list, window, &self.world, &[], None, &ui2d::WorldViews::default());
                     }
                     match open_uploader(&mut self.uploader, &self.client_root) {
@@ -3750,7 +4005,7 @@ impl App {
                 }
             }
             (Screen::Login | Screen::Servers | Screen::Characters | Screen::Create, _, _)
-                if !self.modern_hud.preferences.enabled && self.lobby.load_error.is_none() && self.tables_error.is_none() && self.ui_error.is_none() => {}
+                if !self.modern_hud.preferences.enabled && !xdat_interface && self.lobby.load_error.is_none() && self.tables_error.is_none() && self.ui_error.is_none() => {}
             (Screen::Login | Screen::Servers | Screen::Characters | Screen::Create, _, _) => {
                 let points_per_pixel = 1.0 / egui.ctx.pixels_per_point();
                 lobby_commands = self.lobby.panels(&egui.ctx, version(), (size.0 as f32, size.1 as f32), points_per_pixel);
@@ -4510,7 +4765,9 @@ mod tests {
         view.trace = trace;
         view.neighbours = NeighbourSet::new(TileId { x:22,y:22 },loaded.level.clone());
         view.camera = loaded.camera;
-        app.game_ui = Some(loaded.ui.take().unwrap().unwrap());
+        let mut demo_ui = loaded.ui.take().unwrap().unwrap();
+        demo_ui.enable_interlude_hud(app.interlude_hud);
+        app.game_ui = Some(demo_ui);
         app.tables = Some(Arc::new(tables));
         app.world = characters::demo_world(view.camera.target, view.camera.facing(), 0);
         app.world.inventory.items = vec![l2_net::game::InventoryItem { object_id: 97001, item_id: 57, count: 5, ..Default::default() }];

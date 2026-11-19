@@ -173,6 +173,15 @@ pub enum SelectAction {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct HostLayout {
+    pub combo: Rect,
+    pub start: Rect,
+    pub create: Rect,
+    pub delete: Rect,
+    pub exit: Rect,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectScreen {
     pub screen: (i32, i32),
     pub texts: SelectTexts,
@@ -185,6 +194,7 @@ pub struct SelectScreen {
     pub dialog: Option<Dialog>,
     pub pressed: Option<Hit>,
     pub stop_voices: bool,
+    pub host: Option<HostLayout>,
 }
 
 impl SelectScreen {
@@ -201,7 +211,12 @@ impl SelectScreen {
             dialog: None,
             pressed: None,
             stop_voices: false,
+            host: None,
         }
+    }
+
+    fn combo_origin(&self) -> (i32, i32) {
+        if self.host.is_some() { (0, 0) } else { (SELECT_RECT.x, SELECT_RECT.y) }
     }
 
     pub fn start_origin(&self) -> (i32, i32) {
@@ -328,8 +343,20 @@ impl SelectScreen {
             };
         }
         let combo = self.combo.expanded_rect();
-        if combo.offset(SELECT_RECT.x, SELECT_RECT.y).contains(x, y) {
+        let combo_origin = self.combo_origin();
+        if combo.offset(combo_origin.0, combo_origin.1).contains(x, y) {
             return Some(Hit::Combo);
+        }
+        if let Some(host) = &self.host {
+            if host.start.contains(x, y) && self.start_enabled {
+                return Some(Hit::Start);
+            }
+            for (rect, hit, enabled) in [(host.create, Hit::Create, !self.locked), (host.delete, Hit::Delete, self.delete_enabled), (host.exit, Hit::Exit, !self.locked)] {
+                if rect.contains(x, y) && enabled {
+                    return Some(hit);
+                }
+            }
+            return None;
         }
         let start = self.start_origin();
         if START_BUTTON_RECT.offset(start.0, start.1).contains(x, y) && self.start_enabled {
@@ -345,14 +372,16 @@ impl SelectScreen {
     }
 
     pub fn mouse_move(&mut self, x: i32, y: i32) {
-        self.combo.mouse_move(x - SELECT_RECT.x, y - SELECT_RECT.y);
+        let origin = self.combo_origin();
+        self.combo.mouse_move(x - origin.0, y - origin.1);
     }
 
     pub fn mouse_down(&mut self, x: i32, y: i32) -> Option<SelectAction> {
         self.pressed = self.hit(x, y);
         if self.dialog.is_none() {
             if self.pressed == Some(Hit::Combo) {
-                self.combo.mouse_move(x - SELECT_RECT.x, y - SELECT_RECT.y);
+                let origin = self.combo_origin();
+                self.combo.mouse_move(x - origin.0, y - origin.1);
                 if let Some(index) = self.combo.mouse_down() {
                     return self.choose(index as usize);
                 }
@@ -396,7 +425,7 @@ impl SelectScreen {
         self.start(name_ok)
     }
 
-    pub fn paint(&self, list: &mut DrawList, font: &BitmapFont, tags: &[NameTag]) {
+    pub fn paint_tags(&self, list: &mut DrawList, font: &BitmapFont, tags: &[NameTag]) {
         for tag in tags {
             let width = font.measure(&tag.name) as i32;
             list.draw_text(tag.x - width / 2, tag.y + NAME_FONT_OFFSET, tag.color, &tag.name, font);
@@ -405,6 +434,10 @@ impl SelectScreen {
                 list.draw_text(line.x - width / 2, line.y, TEXT, &line.text, font);
             }
         }
+    }
+
+    pub fn paint(&self, list: &mut DrawList, font: &BitmapFont, tags: &[NameTag]) {
+        self.paint_tags(list, font, tags);
         self.paint_select(list, font);
         self.paint_start(list, font);
         self.paint_function(list, font);
@@ -483,7 +516,7 @@ impl SelectScreen {
         Some(view)
     }
 
-    fn paint_dialog(&self, list: &mut DrawList, font: &BitmapFont) {
+    pub fn paint_dialog(&self, list: &mut DrawList, font: &BitmapFont) {
         let (ox, oy) = self.dialog_origin();
         let Some(view) = self.dialog_view() else { return };
         let pressed = match self.pressed {

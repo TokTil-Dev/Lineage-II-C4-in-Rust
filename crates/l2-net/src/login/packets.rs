@@ -13,6 +13,8 @@ pub const OP_PLAY_OK: u8 = 0x07;
 pub const OP_SC_CHECK_START: u8 = 0x0a;
 pub const SC_CHECK_WRONG: u8 = 31;
 
+pub const OP_GAME_GUARD_AUTH: u8 = 0x0b;
+pub const OP_REQUEST_AUTH_GAME_GUARD: u8 = 0x07;
 pub const OP_REQUEST_AUTH_LOGIN: u8 = 0x00;
 pub const OP_REQUEST_SERVER_LOGIN: u8 = 0x02;
 pub const OP_REQUEST_SERVER_LIST: u8 = 0x05;
@@ -81,7 +83,36 @@ pub fn read_login_notice(body: &[u8]) -> super::flow::LoginNotice {
 }
 
 pub fn read_server_list(body: &[u8]) -> Result<Vec<GameServer>> {
+    read_servers(&mut Reader::new(body))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerCharacters {
+    pub server_id: u8,
+    pub characters: u8,
+    pub deletions: Vec<i32>,
+}
+
+pub fn read_server_list_modern(body: &[u8]) -> Result<(Vec<GameServer>, Vec<ServerCharacters>)> {
     let mut r = Reader::new(body);
+    let servers = read_servers(&mut r)?;
+    r.read_h()?;
+    let count = r.read_c()?;
+    let mut characters = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let server_id = r.read_c()?;
+        let owned = r.read_c()?;
+        let pending = r.read_c()?;
+        let mut deletions = Vec::with_capacity(pending as usize);
+        for _ in 0..pending {
+            deletions.push(r.read_d()?);
+        }
+        characters.push(ServerCharacters { server_id, characters: owned, deletions });
+    }
+    Ok((servers, characters))
+}
+
+fn read_servers(r: &mut Reader) -> Result<Vec<GameServer>> {
     r.read_c()?;
     let count = r.read_c()? as usize;
     let last = r.read_c()?;
@@ -102,6 +133,54 @@ pub fn read_server_list(body: &[u8]) -> Result<Vec<GameServer>> {
         servers.push(GameServer { id, ip, port, players, max_players, online: status != 0, extra });
     }
     Ok(servers)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InitModern {
+    pub session_id: i32,
+    pub protocol: i32,
+    pub modulus: [u8; 128],
+    pub guard: [u8; 16],
+    pub blowfish_key: [u8; 16],
+}
+
+pub fn read_init_modern(body: &[u8]) -> Option<InitModern> {
+    let mut r = Reader::new(body);
+    if r.read_c().ok()? != OP_INIT {
+        return None;
+    }
+    let session_id = r.read_d().ok()?;
+    let protocol = r.read_d().ok()?;
+    let mut modulus: [u8; 128] = r.read_b(128).ok()?.try_into().ok()?;
+    super::rsa::unscramble_modulus(&mut modulus);
+    let guard = r.read_b(16).ok()?.try_into().ok()?;
+    let blowfish_key = r.read_b(16).ok()?.try_into().ok()?;
+    Some(InitModern { session_id, protocol, modulus, guard, blowfish_key })
+}
+
+pub fn request_auth_game_guard(session_id: i32, guard: &[u8; 16]) -> Vec<u8> {
+    let mut w = Writer::new();
+    w.write_c(OP_REQUEST_AUTH_GAME_GUARD);
+    w.write_d(session_id);
+    w.write_b(guard);
+    w.into_bytes()
+}
+
+pub fn read_game_guard_auth(body: &[u8]) -> Result<i32> {
+    let mut r = Reader::new(body);
+    r.read_c()?;
+    r.read_d()
+}
+
+pub fn request_auth_login_modern(modulus: &[u8; 128], user: &[u8], password: &[u8], session_id: i32) -> Option<Vec<u8>> {
+    let mut block = super::rsa::credentials_block(user, password)?;
+    let sealed = super::rsa::encrypt_no_padding(modulus, &block);
+    block.fill(0);
+    let mut w = Writer::new();
+    w.write_c(OP_REQUEST_AUTH_LOGIN);
+    w.write_b(&sealed?);
+    w.write_d(session_id);
+    Some(w.into_bytes())
 }
 
 pub fn request_auth_login(user: &[u8], password: &[u8]) -> Vec<u8> {
@@ -145,7 +224,18 @@ pub fn describe_refusal(opcode: u8, code: u8) -> (&'static str, String) {
         (OP_LOGIN_FAIL, 0x02) => ("credenciais", "senha incorreta"),
         (OP_LOGIN_FAIL, 0x03) => ("credenciais", "usuário ou senha incorretos"),
         (OP_LOGIN_FAIL, 0x04) => ("credenciais", "acesso negado"),
+        (OP_LOGIN_FAIL, 0x05) => ("credenciais", "dados da conta incorretos, contate o suporte"),
         (OP_LOGIN_FAIL, 0x07) => ("credenciais", "conta já em uso"),
+        (OP_LOGIN_FAIL, 0x0c) => ("credenciais", "menor de 18 anos"),
+        (OP_LOGIN_FAIL, 0x0f) => ("credenciais", "servidor sobrecarregado"),
+        (OP_LOGIN_FAIL, 0x10) => ("credenciais", "servidor em manutenção"),
+        (OP_LOGIN_FAIL, 0x11) => ("credenciais", "senha temporária expirada"),
+        (OP_LOGIN_FAIL, 0x12) => ("credenciais", "tempo de jogo expirado"),
+        (OP_LOGIN_FAIL, 0x14) => ("credenciais", "erro do sistema"),
+        (OP_LOGIN_FAIL, 0x15) => ("credenciais", "falha de acesso"),
+        (OP_LOGIN_FAIL, 0x16) => ("credenciais", "IP restrito"),
+        (OP_LOGIN_FAIL, 0x23) => ("credenciais", "múltiplas janelas bloqueadas"),
+        (OP_LOGIN_FAIL, 0x24) => ("credenciais", "conta inativa"),
         (OP_LOGIN_FAIL, _) => ("credenciais", "recusado"),
         (OP_ACCOUNT_KICKED, 0x20) => ("conta", "banida permanentemente"),
         (OP_ACCOUNT_KICKED, 0x10) => ("conta", "suspensa por 7 dias"),
@@ -208,5 +298,28 @@ mod tests {
     #[test]
     fn read_server_list_rejects_empty_body() {
         assert!(read_server_list(&[]).is_err());
+    }
+
+    #[test]
+    fn modern_server_list_reads_the_character_tail() {
+        let mut body = vec![4u8, 1, 1, 1, 10, 0, 0, 1];
+        body.extend_from_slice(&7777u32.to_le_bytes());
+        body.extend_from_slice(&[0, 0, 5, 0, 9, 0, 1, 0, 0, 0, 0, 0]);
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&[2, 1, 3, 1]);
+        body.extend_from_slice(&90i32.to_le_bytes());
+        body.extend_from_slice(&[4, 0, 0]);
+        let (servers, characters) = read_server_list_modern(&body).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(
+            characters,
+            vec![
+                ServerCharacters { server_id: 1, characters: 3, deletions: vec![90] },
+                ServerCharacters { server_id: 4, characters: 0, deletions: vec![] },
+            ]
+        );
+        for end in 0..body.len() {
+            assert!(read_server_list_modern(&body[..end]).is_err());
+        }
     }
 }

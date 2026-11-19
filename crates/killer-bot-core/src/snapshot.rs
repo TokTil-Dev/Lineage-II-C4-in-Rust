@@ -387,7 +387,7 @@ impl Snapshot {
                     hp: entry.hp as i32,
                     mp: entry.mp as i32,
                     sp: entry.sp,
-                    exp: entry.exp,
+                    exp: i32::try_from(entry.exp).unwrap_or(i32::MAX),
                     level: entry.level,
                     karma: entry.karma,
                 })

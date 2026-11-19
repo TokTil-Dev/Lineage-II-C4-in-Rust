@@ -11,7 +11,7 @@ const FOOTER: &str = "SafePackage";
 pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<String>, Error> {
     match chronicle {
         crate::Chronicle::C4 => read(body),
-        crate::Chronicle::Interlude => Ok(read_interlude(body)?.into_iter().map(|(_, word)| word).collect()),
+        crate::Chronicle::Interlude | crate::Chronicle::HighFive => Ok(read_interlude(body)?.into_iter().map(|(_, word)| word).collect()),
     }
 }
 

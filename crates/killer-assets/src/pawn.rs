@@ -1,4 +1,5 @@
 use l2_dat::armorgrp::{TAG_ARMOR, TAG_WEAPON, body_part};
+use l2_dat::chargrp::CharRowHighFive;
 use l2_dat::equipment::{item_class_id, weapon_anim_type};
 use l2_dat::hairgrp::STYLES;
 use l2_dat::weapongrp::anim_type;
@@ -195,8 +196,71 @@ pub struct Tables<'a> {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum CharLook<'a> {
+    Classic(&'a CharTemplate),
+    HighFive(&'a CharRowHighFive),
+}
+
+fn classic_body_index(slot: u8) -> Option<usize> {
+    Some(match slot {
+        SLOT_BODY => 0,
+        SLOT_LEGS => 1,
+        SLOT_GLOVES => 2,
+        SLOT_BOOTS => 3,
+        _ => return None,
+    })
+}
+
+fn high_five_body_index(slot: u8) -> Option<usize> {
+    Some(match slot {
+        SLOT_GLOVES => 0,
+        SLOT_BODY => 1,
+        SLOT_LEGS => 2,
+        SLOT_BOOTS => 3,
+        _ => return None,
+    })
+}
+
+impl<'a> CharLook<'a> {
+    fn body_mesh(&self, slot: u8) -> Option<&'a str> {
+        match self {
+            Self::Classic(t) => classic_body_index(slot).map(|i| t.body_meshes[i].as_str()),
+            Self::HighFive(r) => high_five_body_index(slot).and_then(|i| r.body_parts[i].meshes.first()).map(String::as_str),
+        }
+    }
+
+    fn body_texture(&self, slot: u8) -> Option<&'a str> {
+        match self {
+            Self::Classic(t) => classic_body_index(slot).map(|i| t.body_textures[i].as_str()),
+            Self::HighFive(r) => high_five_body_index(slot).and_then(|i| r.body_parts[i].textures.first()).map(String::as_str),
+        }
+    }
+
+    fn face_mesh(&self, face: i32) -> Option<&'a str> {
+        match self {
+            Self::Classic(t) => t.face_meshes.first().map(String::as_str),
+            Self::HighFive(r) => usize::try_from(face).ok().and_then(|f| r.face_meshes.get(f)).map(String::as_str),
+        }
+    }
+
+    fn face_texture(&self, face: i32) -> Option<&'a str> {
+        match self {
+            Self::Classic(t) => usize::try_from(face).ok().and_then(|f| t.face_textures.get(f)).map(String::as_str),
+            Self::HighFive(r) => usize::try_from(face).ok().and_then(|f| r.face_textures.get(f)).map(String::as_str),
+        }
+    }
+
+    fn damage_effect(&self) -> &'a str {
+        match self {
+            Self::Classic(t) => t.damage_effect.as_str(),
+            Self::HighFive(r) => r.damage_effect.as_str(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
 pub struct Player<'a> {
-    pub template: &'a CharTemplate,
+    pub look: CharLook<'a>,
     pub row: usize,
     pub face: i32,
     pub hair_style: i32,
@@ -249,6 +313,18 @@ impl<'a> Player<'a> {
         (value != -1).then_some(value)
     }
 
+    fn high_five_hair_mesh(&self, row: &'a CharRowHighFive, slot: u8) -> Option<&'a str> {
+        let block = usize::try_from(self.helm_mesh_type()).ok()?;
+        let style = usize::try_from(self.hair_style).ok()?;
+        row.hair(block, style, if slot == SLOT_HAIR_A { 0 } else { 2 })
+    }
+
+    fn high_five_hair_texture(&self, row: &'a CharRowHighFive, slot: u8) -> Option<&'a str> {
+        let block = usize::try_from(self.helm_mesh_type()).ok()?;
+        let style = usize::try_from(self.hair_style).ok()?;
+        row.hair(block, style, if slot == SLOT_HAIR_A { 1 } else { 3 })
+    }
+
     fn body_is_fdarkelf_u00(&self) -> bool {
         self.row == FDARKELF_ROW
             && self
@@ -261,25 +337,33 @@ impl<'a> Player<'a> {
         let mut name: Option<String> = None;
         match self.record(slot) {
             None => match slot {
-                SLOT_BOOTS => name = template_string(&self.template.body_meshes[3]),
-                SLOT_LEGS => name = template_string(&self.template.body_meshes[1]),
-                SLOT_BODY => name = template_string(&self.template.body_meshes[0]),
-                SLOT_GLOVES => name = template_string(&self.template.body_meshes[2]),
+                SLOT_BOOTS | SLOT_LEGS | SLOT_BODY | SLOT_GLOVES => {
+                    name = self.look.body_mesh(slot).and_then(template_string);
+                }
                 SLOT_HAIR_B | SLOT_HAIR_A => {
                     let suffix = if slot == SLOT_HAIR_A { "ah" } else { "bh" };
-                    if let (Some(index), Some(pkg), Some(cls)) = (self.hair_index(slot), PKG.get(row), CLS.get(row)) {
-                        name = Some(format!("{pkg}.{cls}_m00{index}_m00_{suffix}"));
-                    }
-                    if row == FDARKELF_ROW
-                        && name
-                            .as_deref()
-                            .is_some_and(|n| contains_ignore_case(n, &format!("FDarkElf_m000_m00_{suffix}")))
-                        && self.body_is_fdarkelf_u00()
-                    {
-                        return Some(format!("DarkElf.FDarkElf_m000_m00_{suffix}_u00"));
+                    match self.look {
+                        CharLook::Classic(_) => {
+                            if let (Some(index), Some(pkg), Some(cls)) =
+                                (self.hair_index(slot), PKG.get(row), CLS.get(row))
+                            {
+                                name = Some(format!("{pkg}.{cls}_m00{index}_m00_{suffix}"));
+                            }
+                            if row == FDARKELF_ROW
+                                && name
+                                    .as_deref()
+                                    .is_some_and(|n| contains_ignore_case(n, &format!("FDarkElf_m000_m00_{suffix}")))
+                                && self.body_is_fdarkelf_u00()
+                            {
+                                return Some(format!("DarkElf.FDarkElf_m000_m00_{suffix}_u00"));
+                            }
+                        }
+                        CharLook::HighFive(high_five) => {
+                            name = self.high_five_hair_mesh(high_five, slot).and_then(template_string);
+                        }
                     }
                 }
-                SLOT_FACE => name = self.template.face_meshes.first().and_then(|m| template_string(m)),
+                SLOT_FACE => name = self.look.face_mesh(self.face).and_then(template_string),
                 _ => {}
             },
             Some(Item::Weapon(weapon)) => {
@@ -361,29 +445,32 @@ impl<'a> Player<'a> {
         match record {
             None | Some(_) if record.is_none() || count <= index => match slot {
                 _ if index != 0 => {}
-                SLOT_BOOTS => name = template_string(&self.template.body_textures[3]),
-                SLOT_LEGS => name = template_string(&self.template.body_textures[1]),
-                SLOT_BODY => name = template_string(&self.template.body_textures[0]),
-                SLOT_GLOVES => name = template_string(&self.template.body_textures[2]),
+                SLOT_BOOTS | SLOT_LEGS | SLOT_BODY | SLOT_GLOVES => {
+                    name = self.look.body_texture(slot).and_then(template_string);
+                }
                 SLOT_HAIR_B | SLOT_HAIR_A => {
                     let suffix = if slot == SLOT_HAIR_A { "ah" } else { "bh" };
-                    if let (Some(hair), Some(cls)) = (self.hair_index(slot), CLS.get(row)) {
-                        name = Some(format!("{cls}.{cls}_m00{hair}_t0{}_m00_{suffix}", self.hair_color));
-                    }
-                    if row == FDARKELF_ROW && self.body_is_fdarkelf_u00() {
-                        for color in 0..4 {
-                            let needle = format!("FDarkElf_m000_t0{color}_m00_{suffix}");
-                            if name.as_deref().is_some_and(|n| contains_ignore_case(n, &needle)) {
-                                return Some(format!("FDarkElf.FDarkElf_m000_t0{color}_m00_{suffix}_u00"));
+                    match self.look {
+                        CharLook::Classic(_) => {
+                            if let (Some(hair), Some(cls)) = (self.hair_index(slot), CLS.get(row)) {
+                                name = Some(format!("{cls}.{cls}_m00{hair}_t0{}_m00_{suffix}", self.hair_color));
                             }
+                            if row == FDARKELF_ROW && self.body_is_fdarkelf_u00() {
+                                for color in 0..4 {
+                                    let needle = format!("FDarkElf_m000_t0{color}_m00_{suffix}");
+                                    if name.as_deref().is_some_and(|n| contains_ignore_case(n, &needle)) {
+                                        return Some(format!("FDarkElf.FDarkElf_m000_t0{color}_m00_{suffix}_u00"));
+                                    }
+                                }
+                            }
+                        }
+                        CharLook::HighFive(high_five) => {
+                            name = self.high_five_hair_texture(high_five, slot).and_then(template_string);
                         }
                     }
                 }
                 SLOT_FACE => {
-                    name = usize::try_from(self.face)
-                        .ok()
-                        .and_then(|f| self.template.face_textures.get(f))
-                        .and_then(|t| template_string(t));
+                    name = self.look.face_texture(self.face).and_then(template_string);
                 }
                 _ => {}
             },
@@ -517,7 +604,7 @@ impl<'a> Player<'a> {
     }
 
     pub fn damage_effect(&self) -> Option<String> {
-        let name = self.items().armor(self.item_class_id(SLOT_BODY)).map_or(self.template.damage_effect.as_str(), |armor| armor.damage_effect.as_str());
+        let name = self.items().armor(self.item_class_id(SLOT_BODY)).map_or(self.look.damage_effect(), |armor| armor.damage_effect.as_str());
         damage_effect_name(name)
     }
 }
@@ -730,7 +817,7 @@ mod tests {
 
         fn player(&self, row: usize, equipped: Equipped) -> Player<'_> {
             Player {
-                template: &self.template,
+                look: CharLook::Classic(&self.template),
                 row,
                 face: 2,
                 hair_style: 1,

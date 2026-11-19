@@ -23,6 +23,9 @@ killer-font = { path = "../../crates/killer-font" }
 killer-world = { path = "../../crates/killer-world" }
 l2-crypto = { path = "../../crates/l2-crypto" }
 l2-dat = { path = "../../crates/l2-dat" }
+l2-xdat = { path = "../../crates/l2-xdat" }
+l2-uscript = { path = "../../crates/l2-uscript" }
+l2-catalog = { path = "../../crates/l2-catalog" }
 l2-net = { path = "../../crates/l2-net" }
 ue2-assets = { path = "../../crates/ue2-assets" }
 ue2-level = { path = "../../crates/ue2-level" }

@@ -174,6 +174,30 @@ fn animation(client: &mut Client, animations: &mut Animations, path: &str) -> Op
     Some(loaded)
 }
 
+#[cfg(target_arch = "wasm32")]
+pub fn try_load_character(client: &mut Client, shared: &mut Shared, key: AppearanceKey, appearance: &Appearance, draw_scale: f32) -> Result<LoadResult, killer_platform::deferred_io::Ticket> {
+    let animations: HashSet<String> = shared.animations.keys().cloned().collect();
+    let missing = shared.missing.clone();
+    let had_options = shared.options.is_some();
+    client.begin_attempt();
+    killer_platform::deferred_io::take_blocked();
+    killer_platform::deferred_io::take_ticket();
+    killer_platform::deferred_io::set(true);
+    let result = load_character(client, shared, key, appearance, draw_scale);
+    killer_platform::deferred_io::set(false);
+    let blocked = killer_platform::deferred_io::take_blocked();
+    client.finish_attempt(!blocked);
+    if blocked {
+        shared.animations.retain(|name, _| animations.contains(name));
+        shared.missing = missing;
+        if !had_options {
+            shared.options = None;
+        }
+        return Err(killer_platform::deferred_io::take_ticket());
+    }
+    Ok(result)
+}
+
 pub fn load_character(
     client: &mut Client,
     shared: &mut Shared,
@@ -281,7 +305,7 @@ fn loaded_parts(
         match load(part) {
             Some(mesh) => parts.push(mesh),
             None => {
-                if missing.insert(part.mesh.to_lowercase()) {
+                if !killer_platform::deferred_io::blocked() && missing.insert(part.mesh.to_lowercase()) {
                     log::warn!("malha {} não encontrada; peça pulada", part.mesh);
                 }
                 skipped.push(part.mesh.as_str());
@@ -298,6 +322,23 @@ fn loaded_parts(
 mod tests {
     use super::*;
 
+    const CLASSIC_ROW_IDENTITY: [(i32, i32, i32); 14] = [
+        (0, 0, 0),
+        (0, 0, 1),
+        (2, 31, 0),
+        (2, 31, 1),
+        (4, 53, 0),
+        (4, 53, 1),
+        (1, 18, 0),
+        (1, 18, 1),
+        (0, 10, 0),
+        (0, 10, 1),
+        (3, 44, 0),
+        (3, 44, 1),
+        (3, 49, 0),
+        (3, 49, 1),
+    ];
+
     #[test]
     #[ignore]
     fn distinct_real_characters_share_live_animations_and_release_them_after_removal() {
@@ -311,7 +352,8 @@ mod tests {
         let mut live = Vec::new();
         let mut meshes = HashSet::new();
         for (row, &weapon) in weapons.iter().enumerate().take(tables.chargrp.len()) {
-            let key = AppearanceKey::Player { row, face: 0, hair_style: 0, hair_color: 0, equipped: Equipped { rhand: weapon as i32, ..Equipped::default() }, enchant_effect: 0, hero: false, mounted: 0 };
+            let (race, class_id, sex) = CLASSIC_ROW_IDENTITY[row];
+            let key = AppearanceKey::Player { race, class_id, sex, face: 0, hair_style: 0, hair_color: 0, equipped: Equipped { rhand: weapon as i32, ..Equipped::default() }, enchant_effect: 0, hero: false, mounted: 0 };
             let look = crate::characters::look(key, &tables).unwrap();
             meshes.extend(look.appearance.parts.iter().map(|part| part.mesh.clone()));
             let result = load_character(&mut client, &mut shared, key, &look.appearance, look.draw_scale);

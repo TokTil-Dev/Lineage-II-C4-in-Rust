@@ -29,6 +29,7 @@ pub mod scene;
 pub mod shots;
 pub mod engine_math;
 pub mod fishing_float;
+pub mod gfx_lib;
 pub mod loading_image;
 pub mod material_sequence;
 pub mod skill_attacks;

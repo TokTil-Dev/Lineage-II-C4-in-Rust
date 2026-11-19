@@ -64,6 +64,8 @@ const cursors=new CursorBank(image=>{
     return `url("${surface.toDataURL()}") ${image.hotspot[0]} ${image.hotspot[1]}, default`;
 });
 const mode=new URLSearchParams(location.search).get('mode');
+const varied=new URLSearchParams(location.search).get('varied')==='1';
+const crowd=Math.max(0,Math.min(2000,Number(new URLSearchParams(location.search).get('crowd'))||0));
 const notice = document.querySelector('#notice');
 function warn(text) { notice.querySelector('span').textContent=text; notice.hidden=false; }
 const audio=new BrowserAudio({available:value=>worker.postMessage({type:'audioAvailable',value}),ended:id=>worker.postMessage({type:'audioEnded',id}),warning:warn});
@@ -90,7 +92,7 @@ function start(files,trusted=false) {
     try { preferences = localStorage.getItem('killer.hud') || ''; settings = localStorage.getItem('killer.settings') || '{}'; } catch {warn('Não foi possível ler as preferências salvas neste navegador.');}
     preferences = withStyle(preferences, document.querySelector('#hud-style').value);
     try { localStorage.setItem('killer.hud', preferences); } catch {}
-    worker.postMessage({ type: 'start', canvas: surface, files, trusted, mode, scale: devicePixelRatio, preferences, settings, gateway:document.querySelector('#gateway').value }, [surface]);
+    worker.postMessage({ type: 'start', canvas: surface, files, trusted, mode, crowd, varied, scale: devicePixelRatio, preferences, settings, gateway:document.querySelector('#gateway').value }, [surface]);
 }
 
 let remoteStats=null;
@@ -145,7 +147,7 @@ worker.addEventListener('message', ({ data }) => {
         panel.hidden=top===undefined && !panel.open;
         panel.style.top=`${top??112}px`;
         const names=['Mundo/mapas','Personagens','Carga/efeitos','Interface'];
-        panel.querySelector('pre').textContent=`CPU: ${data.cpu.toFixed(1)} ms · pico ${data.worst.toFixed(1)} ms\n${names.map((name,i)=>`${name}: ${data.stages[i].toFixed(1)} ms`).join('\n')}\nRender (CPU): ${data.render.toFixed(1)} ms\nHUD: ${data.hud.toFixed(1)} ms\nEntidades: ${data.entities} · peças: ${data.pieces}\nSIMD: ${data.simd?'ativo':'inativo'}`;
+        panel.querySelector('pre').textContent=`CPU: ${data.cpu.toFixed(1)} ms · pico ${data.worst.toFixed(1)} ms\n${names.map((name,i)=>`${name}: ${data.stages[i].toFixed(1)} ms`).join('\n')}\nRender (CPU): ${data.render.toFixed(1)} ms\nHUD: ${data.hud.toFixed(1)} ms${data.loads&&data.loads.count?`\nCargas: ${data.loads.count} · ${data.loads.total.toFixed(0)} ms · pico ${data.loads.worst.toFixed(1)} ms`:''}\nEntidades: ${data.entities} · peças: ${data.pieces}\nSIMD: ${data.simd?'ativo':'inativo'}`;
         if (remoteStats) panel.querySelector('pre').textContent+=`\nR2: ${remoteStats.requests} leituras · ${(remoteStats.bytes/1048576).toFixed(0)} MB · ${remoteStats.ms.toFixed(0)} ms${upgraded?` · ${upgraded.files}/${upgraded.total} locais`:''}`;
         if (data.ground) {
             const ground=data.ground;
@@ -260,9 +262,9 @@ play.addEventListener('click', async () => {
         if (cache) {
             const wanted = wantedFiles(preload, localStorage);
             stageEvent('begin','download','preparando');
-            const result = await prefetch(entries, wanted, {cache, progress: p => stageEvent('begin','download',`${p.files}/${p.total} arquivos · ${megabytes(p.bytes)}/${megabytes(p.totalBytes)} MB`)});
+            const result = await prefetch(entries, wanted, {cache, limitBytes:(config.prefetchMB ?? 8)*1048576, progress: p => stageEvent('begin','download',`${p.files}/${p.total} arquivos · ${megabytes(p.bytes)}/${megabytes(p.totalBytes)} MB`)});
             files = result.files;
-            stageEvent('complete','download',`${wanted.size-result.failures.length} arquivos · ${megabytes(result.bytes)} MB`);
+            stageEvent('complete','download',`${megabytes(result.bytes)} MB`);
             if (result.failures.length) console.warn('Arquivos que seguem remotos',result.failures);
             discardStale(entries, cache).catch(() => {});
         }
@@ -319,6 +321,7 @@ canvas.addEventListener('wheel', event => {
     if (ready) worker.postMessage({type:'wheel',values:[Math.round(event.offsetX),Math.round(event.offsetY),-Math.sign(event.deltaY)]});
 },{passive:false});
 if (mode === 'cache') start(null);
+if (config.clientUrl && !mode && new URLSearchParams(location.search).get('gate')!=='1') play.click();
 
 canvas.addEventListener('paste',event=>{
     if (!ready) return;

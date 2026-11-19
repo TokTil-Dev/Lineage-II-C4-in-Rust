@@ -20,8 +20,10 @@ export async function fetchBlob(entry,cache,fetcher) {
     return blob;
 }
 
-export async function prefetch(entries,wanted,{cache,fetcher=fetch,concurrency=16,progress=()=>{}}) {
-    const picked=entries.map((entry,index)=>[index,entry]).filter(([,[name]])=>wanted.has(relative(name)));
+export async function prefetch(entries,wanted,{cache,fetcher=fetch,concurrency=16,limitBytes=Infinity,progress=()=>{}}) {
+    const asked=entries.map((entry,index)=>[index,entry]).filter(([,[name]])=>wanted.has(relative(name)));
+    const stored=await Promise.all(asked.map(([,[,entry]])=>entry.size<=limitBytes?true:cache.match(versioned(entry)).then(Boolean,()=>false)));
+    const picked=asked.filter((_,index)=>stored[index]);
     const total=picked.reduce((sum,[,[,entry]])=>sum+entry.size,0);
     const result=entries.slice();
     const failures=[];

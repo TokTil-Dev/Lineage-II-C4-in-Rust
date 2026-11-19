@@ -48,6 +48,199 @@ thread_local! {
     static CHUNKS: RefCell<Chunks> = RefCell::new(Chunks::default());
     static LAST: RefCell<HashMap<Rc<str>, u64>> = RefCell::new(HashMap::new());
     static STATS: Cell<(u64, u64, f64)> = const { Cell::new((0, 0, 0.0)) };
+    static DEFERRED: Cell<bool> = const { Cell::new(false) };
+    static BLOCKED: Cell<bool> = const { Cell::new(false) };
+    static WANTED: RefCell<Vec<(Origin, u64)>> = const { RefCell::new(Vec::new()) };
+    static PENDING: RefCell<std::collections::HashSet<(Rc<str>, u64)>> = RefCell::new(std::collections::HashSet::new());
+    static BROKEN: RefCell<HashMap<(Rc<str>, u64), String>> = RefCell::new(HashMap::new());
+    static MISSING: RefCell<Vec<(Rc<str>, u64)>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Default)]
+pub struct Ticket(Vec<(Rc<str>, u64)>);
+
+pub fn take_ticket() -> Ticket {
+    Ticket(MISSING.with(|missing| std::mem::take(&mut *missing.borrow_mut())))
+}
+
+pub fn ready(ticket: &Ticket) -> bool {
+    ticket.0.iter().all(|key| CHUNKS.with(|chunks| chunks.borrow().map.contains_key(key)) || BROKEN.with(|broken| broken.borrow().contains_key(key)))
+}
+
+const SPAN: u64 = 8;
+const EDGE: u64 = 2;
+const DEFERRED_LIMIT: u64 = 64 << 20;
+
+#[derive(Clone)]
+enum Origin {
+    Blob(web_sys::Blob, Rc<str>),
+    Remote(Remote),
+}
+
+impl Origin {
+    fn id(&self) -> Rc<str> {
+        match self {
+            Origin::Blob(_, id) => id.clone(),
+            Origin::Remote(remote) => remote.url.clone(),
+        }
+    }
+
+    fn size(&self) -> u64 {
+        match self {
+            Origin::Blob(blob, _) => blob.size() as u64,
+            Origin::Remote(remote) => remote.size,
+        }
+    }
+}
+
+pub fn set_deferred(on: bool) {
+    DEFERRED.with(|deferred| deferred.set(on));
+}
+
+pub fn blocked() -> bool {
+    BLOCKED.with(Cell::get)
+}
+
+pub fn take_blocked() -> bool {
+    BLOCKED.with(|blocked| blocked.replace(false))
+}
+
+fn read_cached(origin: &Origin, position: u64, buffer: &mut [u8]) -> io::Result<()> {
+    let id = origin.id();
+    let first = position / CHUNK;
+    let last = (position + buffer.len() as u64 - 1) / CHUNK;
+    let mut missing = false;
+    for index in first..=last {
+        let key = (id.clone(), index);
+        if let Some(reason) = BROKEN.with(|broken| broken.borrow().get(&key).cloned()) {
+            return Err(io::Error::other(reason));
+        }
+        if CHUNKS.with(|chunks| chunks.borrow().map.contains_key(&key)) {
+            continue;
+        }
+        missing = true;
+        MISSING.with(|list| list.borrow_mut().push(key.clone()));
+        if !PENDING.with(|pending| pending.borrow().contains(&key)) {
+            WANTED.with(|wanted| wanted.borrow_mut().push((origin.clone(), index)));
+        }
+    }
+    if missing {
+        BLOCKED.with(|blocked| blocked.set(true));
+        return Err(io::ErrorKind::WouldBlock.into());
+    }
+    let mut done = 0;
+    while done < buffer.len() {
+        let at = position + done as u64;
+        let data = CHUNKS.with(|chunks| chunks.borrow().map.get(&(id.clone(), at / CHUNK)).cloned()).ok_or(io::ErrorKind::WouldBlock)?;
+        let offset = (at % CHUNK) as usize;
+        let take = data.len().saturating_sub(offset).min(buffer.len() - done);
+        if take == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        buffer[done..done + take].copy_from_slice(&data[offset..offset + take]);
+        done += take;
+    }
+    Ok(())
+}
+
+pub fn want_edges(file: &File) {
+    if !DEFERRED.with(Cell::get) {
+        return;
+    }
+    let origin = match &file.file {
+        Source::Blob(blob) => match file.path.as_deref() {
+            Some(path) => Origin::Blob(blob.clone(), path.into()),
+            None => return,
+        },
+        Source::Remote(remote) => Origin::Remote(remote.clone()),
+    };
+    let total = origin.size().div_ceil(CHUNK);
+    let id = origin.id();
+    let edges = (0..EDGE.min(total)).chain(total.saturating_sub(EDGE)..total);
+    for index in edges {
+        let key = (id.clone(), index);
+        let known = CHUNKS.with(|chunks| chunks.borrow().map.contains_key(&key)) || PENDING.with(|pending| pending.borrow().contains(&key)) || BROKEN.with(|broken| broken.borrow().contains_key(&key));
+        if !known {
+            WANTED.with(|wanted| wanted.borrow_mut().push((origin.clone(), index)));
+        }
+    }
+}
+
+pub fn dispatch() {
+    let mut wanted = WANTED.with(|wanted| std::mem::take(&mut *wanted.borrow_mut()));
+    wanted.retain(|(origin, index)| PENDING.with(|pending| pending.borrow_mut().insert((origin.id(), *index))));
+    wanted.sort_by(|a, b| a.0.id().cmp(&b.0.id()).then(a.1.cmp(&b.1)));
+    let mut spans: Vec<(Origin, u64, u64)> = Vec::new();
+    for (origin, index) in wanted {
+        match spans.last_mut() {
+            Some((current, first, last)) if current.id() == origin.id() && index == *last + 1 && index - *first < SPAN => *last = index,
+            Some((current, _, last)) if current.id() == origin.id() && index == *last => {}
+            _ => spans.push((origin, index, index)),
+        }
+    }
+    for (origin, first, last) in spans {
+        wasm_bindgen_futures::spawn_local(async move {
+            let start = first * CHUNK;
+            let end = ((last + 1) * CHUNK).min(origin.size());
+            let result = fetch_async(&origin, start, end).await;
+            let id = origin.id();
+            for index in first..=last {
+                let key = (id.clone(), index);
+                PENDING.with(|pending| pending.borrow_mut().remove(&key));
+                match &result {
+                    Ok(bytes) => {
+                        let from = ((index - first) * CHUNK) as usize;
+                        let to = (from + CHUNK as usize).min(bytes.len());
+                        if from < to {
+                            CHUNKS.with(|chunks| chunks.borrow_mut().insert(key, Rc::new(bytes[from..to].to_vec())));
+                        } else {
+                            BROKEN.with(|broken| broken.borrow_mut().insert(key, "leitura além do fim do arquivo".into()));
+                        }
+                    }
+                    Err(reason) => {
+                        if let Origin::Blob(_, path) = &origin {
+                            STALE.with(|stale| { stale.borrow_mut().insert(path.to_string()); });
+                        }
+                        BROKEN.with(|broken| broken.borrow_mut().insert(key, reason.clone()));
+                    }
+                }
+            }
+        });
+    }
+}
+
+async fn fetch_async(origin: &Origin, start: u64, end: u64) -> Result<Vec<u8>, String> {
+    let describe = |value: wasm_bindgen::JsValue| value.as_string().unwrap_or_else(|| "falha na leitura assíncrona".into());
+    let expected = (end - start) as usize;
+    let buffer = match origin {
+        Origin::Blob(blob, _) => {
+            let slice = blob.slice_with_f64_and_f64(start as f64, end as f64).map_err(describe)?;
+            wasm_bindgen_futures::JsFuture::from(slice.array_buffer()).await.map_err(describe)?
+        }
+        Origin::Remote(remote) => {
+            let started = js_sys::Date::now();
+            let headers = web_sys::Headers::new().map_err(describe)?;
+            headers.set("Range", &format!("bytes={start}-{}", end - 1)).map_err(describe)?;
+            let init = web_sys::RequestInit::new();
+            init.set_headers(&headers);
+            let scope: web_sys::WorkerGlobalScope = js_sys::global().unchecked_into();
+            let response: web_sys::Response = wasm_bindgen_futures::JsFuture::from(scope.fetch_with_str_and_init(&remote.url, &init)).await.map_err(describe)?.unchecked_into();
+            if response.status() != 206 {
+                return Err(format!("falha ao baixar {} (HTTP {})", remote.url, response.status()));
+            }
+            let buffer = wasm_bindgen_futures::JsFuture::from(response.array_buffer().map_err(describe)?).await.map_err(describe)?;
+            STATS.with(|stats| {
+                let (requests, bytes, ms) = stats.get();
+                stats.set((requests + 1, bytes + expected as u64, ms + js_sys::Date::now() - started));
+            });
+            buffer
+        }
+    };
+    let bytes = js_sys::Uint8Array::new(&buffer).to_vec();
+    if bytes.len() != expected {
+        return Err(format!("leitura incompleta: {} de {expected} bytes", bytes.len()));
+    }
+    Ok(bytes)
 }
 
 fn key(path: impl AsRef<Path>) -> io::Result<String> {
@@ -231,6 +424,17 @@ impl Read for File {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let count = buffer.len().min(self.file.size().saturating_sub(self.position) as usize);
         if count == 0 { return Ok(0); }
+        if DEFERRED.with(Cell::get) && (count as u64) <= DEFERRED_LIMIT {
+            let origin = match &self.file {
+                Source::Blob(blob) => self.path.as_deref().map(|path| Origin::Blob(blob.clone(), path.into())),
+                Source::Remote(remote) => Some(Origin::Remote(remote.clone())),
+            };
+            if let Some(origin) = origin {
+                read_cached(&origin, self.position, &mut buffer[..count])?;
+                self.position += count as u64;
+                return Ok(count);
+            }
+        }
         match &self.file {
             Source::Blob(file) => {
                 let blob = file.slice_with_f64_and_f64(self.position as f64, self.position as f64 + count as f64).map_err(js_error)?;
@@ -304,7 +508,18 @@ pub fn refresh(relative: &str, file: &wasm_bindgen::JsValue) -> bool {
         let mut files = files.borrow_mut();
         let Some(entry) = files.get_mut(&path) else { return false };
         let local = matches!(&*entry, Entry::Local(_));
-        if local { *entry = Entry::Local(file); }
+        if local {
+            *entry = Entry::Local(file);
+            CHUNKS.with(|chunks| {
+                let mut chunks = chunks.borrow_mut();
+                let stale: Vec<_> = chunks.map.keys().filter(|(id, _)| **id == *path).cloned().collect();
+                for key in stale {
+                    if let Some(data) = chunks.map.remove(&key) { chunks.bytes -= data.len(); }
+                }
+                chunks.order.retain(|(id, _)| **id != *path);
+            });
+            BROKEN.with(|broken| broken.borrow_mut().retain(|(id, _), _| **id != *path));
+        }
         local
     })
 }

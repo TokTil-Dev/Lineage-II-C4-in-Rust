@@ -1,4 +1,4 @@
-use crate::armorgrp::{ICONS, ItemHead, item_head};
+use crate::armorgrp::{ICONS, ItemHead, item_head_as};
 use crate::{DatReader, Error};
 
 pub const TAG_ETC: u32 = 2;
@@ -21,11 +21,15 @@ pub struct EtcItem {
 }
 
 pub fn read(body: &[u8]) -> Result<Vec<EtcItem>, Error> {
+    read_as(body, crate::Chronicle::C4)
+}
+
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<EtcItem>, Error> {
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;
     (0..count)
         .map(|_| {
-            let head = item_head(&mut reader)?;
+            let head = item_head_as(&mut reader, chronicle)?;
             record(&mut reader, head)
         })
         .collect()

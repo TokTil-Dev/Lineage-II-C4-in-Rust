@@ -98,6 +98,7 @@ pub struct LobbyC4 {
     ping_cache: crate::ping_cache::PingCache,
     ping_edits: Vec<crate::ui_option_config::ConfigEdit>,
     cursor: (i32, i32),
+    h5: Option<crate::lobby_h5::H5Lobby>,
 }
 
 fn message_table(tables: &DatTables) -> std::collections::HashMap<u32, String> {
@@ -188,7 +189,36 @@ impl LobbyC4 {
             ping_cache: Default::default(),
             ping_edits: Vec::new(),
             cursor: (0, 0),
+            h5: None,
         }
+    }
+
+    pub fn enable_h5(&mut self, interface: l2_dat::xdat::Interface) {
+        self.h5 = Some(crate::lobby_h5::H5Lobby::new(interface));
+        self.credits = CreditScreen::new(self.size, crate::lobby_h5::original::credit_entries());
+        self.apply_h5_host();
+    }
+
+    pub fn h5_mut(&mut self) -> Option<&mut crate::lobby_h5::H5Lobby> {
+        self.h5.as_mut()
+    }
+
+    fn apply_h5_host(&mut self) {
+        let Some(h5) = &self.h5 else { return };
+        self.select.host = h5.select_host(self.size);
+        if let Some(host) = &self.select.host {
+            self.select.combo.rect = host.combo;
+        }
+        self.login.host_function = Some(h5.login_functions(self.size));
+    }
+
+    fn paint_h5_menu(&self, list: &mut DrawList, font: &BitmapFont) {
+        let Some(h5) = &self.h5 else { return };
+        let pressed = match self.login.pressed {
+            Some(killer_ui::lobby_login::Hit::Function(index)) => Some(index),
+            _ => None,
+        };
+        h5.paint_login_menu(list, self.size, font, &|id| self.messages_sys.get(&id).cloned(), self.cursor, pressed);
     }
 
     pub fn resize(&mut self, size: (i32, i32)) {
@@ -211,6 +241,7 @@ impl LobbyC4 {
         self.announce.screen = size;
         self.key_crypt.screen = size;
         self.credits.screen = size;
+        self.apply_h5_host();
     }
 
     pub fn take_help_request(&mut self) -> Option<String> {
@@ -456,7 +487,34 @@ impl LobbyC4 {
         self.servers.finish();
     }
 
+    fn frame_h5(&self, lobby: &Lobby, font: &BitmapFont, tags: &[NameTag]) -> DrawList {
+        let mut list = DrawList::default();
+        let Some(h5) = &self.h5 else { return list };
+        let sys = |id: u32| self.messages_sys.get(&id).cloned();
+        let texture_size = |name: &str| h5.original_texture_size(name);
+        match lobby.screen {
+            LobbyScreen::Login if self.credits.visible => {
+                crate::lobby_h5::original::paint_credits(&mut list, &self.credits, self.size, &texture_size);
+            }
+            LobbyScreen::Login => {
+                self.paint_h5_menu(&mut list, font);
+                match self.overlay {
+                    Some(overlay) => crate::lobby_h5::original::paint_notice(&mut list, self.notice(overlay), font, &texture_size),
+                    None => crate::lobby_h5::original::paint_login_form(&mut list, &self.login, font, &texture_size),
+                }
+            }
+            LobbyScreen::Servers => crate::lobby_h5::original::paint_servers(&mut list, &self.servers, font, &texture_size),
+            LobbyScreen::Characters => h5.paint_characters(&mut list, self.size, &self.select, font, &sys, self.cursor, tags),
+            LobbyScreen::Create => h5.paint_create(&mut list, self.size, font, &sys, self.cursor, (self.create.rotate_visible, self.create.zoomed)),
+        }
+        self.buttons.borrow_mut().clone_from(&list.buttons);
+        list
+    }
+
     pub fn frame(&self, lobby: &Lobby, font: &BitmapFont, tags: &[NameTag]) -> DrawList {
+        if self.h5.is_some() {
+            return self.frame_h5(lobby, font, tags);
+        }
         let mut list = DrawList::default();
         self.replay_logo.paint(&mut list);
         self.replay_play.paint(&mut list);
@@ -479,10 +537,12 @@ impl LobbyC4 {
                     }
                     None => self.login.paint(&mut list, font),
                 }
+                self.paint_h5_menu(&mut list, font);
                 self.key_crypt.paint(&mut list, font);
             }
             LobbyScreen::Servers => {
                 self.login.paint_backdrop(&mut list, font);
+                self.paint_h5_menu(&mut list, font);
                 self.servers.paint(&mut list, font);
             }
             LobbyScreen::Characters => {
@@ -903,7 +963,7 @@ fn card(entry: &l2_net::game::CharSelectEntry) -> CharCard {
         max_hp: entry.max_hp as i32,
         mp: entry.mp as i32,
         max_mp: entry.max_mp as i32,
-        exp: i64::from(entry.exp),
+        exp: entry.exp,
         sp: entry.sp,
         karma: entry.karma,
         delete_seconds: entry.delete_days.max(0),

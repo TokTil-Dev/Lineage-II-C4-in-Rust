@@ -130,6 +130,17 @@ pub struct StaticLightMap {
     pub mips: Vec<Vec<u8>>,
 }
 
+impl StaticLightMap {
+    /// `FStaticLightMapTexture::GetTextureData` (engine.dll 1030aeac): recusa formato diferente do
+    /// atlas e devolve o mip inteiro. Detalhe em `docs/evidence/lightmap-texture-data.md`.
+    pub fn texture_data(&self, mip: usize, format: u8) -> Option<&[u8]> {
+        if format != self.format {
+            return None;
+        }
+        self.mips.get(mip).map(Vec::as_slice)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LightMapGroup {
     pub textures: Vec<StaticLightMap>,

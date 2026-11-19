@@ -4,6 +4,7 @@
 //! `Ver413` (RSA-1024 blocks over a zlib stream). Pure: bytes in, bytes out.
 
 mod cafef00d;
+mod ffedface;
 mod ver413;
 
 use std::borrow::Cow;
@@ -15,7 +16,7 @@ use std::path::Path;
 const HEADER_LEN: usize = 28;
 /// Optional footer `[0, ?, ?, crc32, 0]` as little-endian u32s. On XOR files the CRC
 /// covers header + payload; on `Ver413` files it does not reliably, so block alignment decides.
-const TRAILER_LEN: usize = 20;
+pub const TRAILER_LEN: usize = 20;
 const MAGIC: &str = "Lineage2Ver";
 pub const PROPRIETARY_CONTAINER_MAGIC: [u8; 4] = [0xCA, 0xFE, 0xF0, 0x0D];
 
@@ -27,6 +28,7 @@ pub enum Scheme {
     Ver121,
     Ver413,
     CafeF00d,
+    FfEdFaCe,
 }
 
 #[derive(Debug)]
@@ -65,6 +67,9 @@ pub fn detect(data: &[u8]) -> Result<Scheme, Error> {
     if cafef00d::matches(data) {
         return Ok(Scheme::CafeF00d);
     }
+    if ffedface::matches(data) {
+        return Ok(Scheme::FfEdFaCe);
+    }
     match header_version(data) {
         None => Ok(Scheme::Plain),
         Some(111) => Ok(Scheme::Ver111),
@@ -82,6 +87,7 @@ pub fn decrypt<'a>(data: &'a [u8], path: &Path) -> Result<Cow<'a, [u8]>, Error> 
         Scheme::Ver121 => xor(xor_payload(data)?, ver121_key(path)),
         Scheme::Ver413 => ver413::decrypt(data.get(HEADER_LEN..).ok_or(Error::Truncated)?)?,
         Scheme::CafeF00d => cafef00d::decrypt(data)?,
+        Scheme::FfEdFaCe => ffedface::decrypt(data)?,
     }))
 }
 
@@ -91,7 +97,7 @@ pub fn decrypt_owned(mut data: Vec<u8>, path: &Path) -> Result<Vec<u8>, Error> {
         Scheme::Plain => return Ok(data),
         Scheme::Ver111 => 0xAC,
         Scheme::Ver121 => ver121_key(path),
-        Scheme::Ver413 | Scheme::CafeF00d => return decrypt(&data, path).map(Cow::into_owned),
+        Scheme::Ver413 | Scheme::CafeF00d | Scheme::FfEdFaCe => return decrypt(&data, path).map(Cow::into_owned),
     };
     let payload = xor_payload(&data)?.len();
     data.truncate(HEADER_LEN + payload);
@@ -139,7 +145,7 @@ impl Window {
             Scheme::Plain => Some(Self { header: 0, key: 0 }),
             Scheme::Ver111 => Some(Self { header: HEADER_LEN, key: 0xAC }),
             Scheme::Ver121 => Some(Self { header: HEADER_LEN, key: ver121_key(path) }),
-            Scheme::Ver413 | Scheme::CafeF00d => None,
+            Scheme::Ver413 | Scheme::CafeF00d | Scheme::FfEdFaCe => None,
         })
     }
 

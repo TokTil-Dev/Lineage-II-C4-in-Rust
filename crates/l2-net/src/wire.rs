@@ -51,6 +51,13 @@ impl<'a> Reader<'a> {
         Ok(i32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    pub fn read_q(&mut self) -> Result<i64> {
+        let b = self.read_b(8)?;
+        let mut arr = [0u8; 8];
+        arr.copy_from_slice(b);
+        Ok(i64::from_le_bytes(arr))
+    }
+
     pub fn read_f(&mut self) -> Result<f64> {
         let b = self.read_b(8)?;
         let mut arr = [0u8; 8];
@@ -101,6 +108,10 @@ impl Writer {
     }
 
     pub fn write_d(&mut self, v: i32) {
+        self.buf.extend_from_slice(&v.to_le_bytes());
+    }
+
+    pub fn write_q(&mut self, v: i64) {
         self.buf.extend_from_slice(&v.to_le_bytes());
     }
 

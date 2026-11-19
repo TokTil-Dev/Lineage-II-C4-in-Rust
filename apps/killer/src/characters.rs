@@ -5,9 +5,9 @@ use killer_assets::animation::{
 use killer_assets::characters::{CharacterMesh, NPC_FALLBACK, fallback_npc_appearance};
 use killer_assets::client::{DatTables, LANGUAGE_KOREA};
 use killer_assets::pawn::{
-    Appearance, DUAL_FIST_LEFT_ROTATION, DUAL_FIST_SCALE_DIVISOR, HAND_ALIAS, HEAD_BONE, LEFT_HAND_BONE, NpcPawn, Part,
-    Placement, Player, RIGHT_HAND_BONE, SLOT_GLOVES, SLOT_HAIR_A, SLOT_HAIR_B, SLOT_LEFT_ARM, SLOT_LEFT_HAND,
-    SLOT_RIGHT_ARM, SLOT_RIGHT_HAND, PawnEffect, WeaponEffect, is_dual_fist, weapon_scale,
+    Appearance, CharLook, DUAL_FIST_LEFT_ROTATION, DUAL_FIST_SCALE_DIVISOR, HAND_ALIAS, HEAD_BONE, LEFT_HAND_BONE,
+    NpcPawn, Part, Placement, Player, RIGHT_HAND_BONE, SLOT_GLOVES, SLOT_HAIR_A, SLOT_HAIR_B, SLOT_LEFT_ARM,
+    SLOT_LEFT_HAND, SLOT_RIGHT_ARM, SLOT_RIGHT_HAND, PawnEffect, WeaponEffect, is_dual_fist, weapon_scale,
 };
 use killer_assets::scene::actor_lighting::{Bounds, Query, Sample};
 use killer_assets::scene::emitters::EmitterAsset;
@@ -25,7 +25,7 @@ use killer_world::{
     WaitType, World, anim_section, equipped,
 };
 use l2_dat::animnames::{AnimSet, HideWeapons};
-use l2_dat::chargrp::index_for;
+use l2_dat::chargrp::{index_for, index_for_high_five};
 use l2_dat::{Equipped, Npc, NpcName};
 use l2_net::game::packets::{
     Buff, EQUIP_CHEST, EQUIP_FEET, EQUIP_GLOVES, EQUIP_LEGS, EQUIP_LHAND, EQUIP_RHAND, PartyMember,
@@ -192,15 +192,28 @@ pub fn drawn_pawns(world: &World, tables: &DatTables, frame: &Frame) -> Vec<i32>
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum AppearanceKey {
     Npc { npc_id: i32, equipped: Equipped },
-    Player { row: usize, face: i32, hair_style: i32, hair_color: i32, equipped: Equipped, enchant_effect: u8, hero: bool, mounted: u8 },
+    Player {
+        race: i32,
+        class_id: i32,
+        sex: i32,
+        face: i32,
+        hair_style: i32,
+        hair_color: i32,
+        equipped: Equipped,
+        enchant_effect: u8,
+        hero: bool,
+        mounted: u8,
+    },
 }
 
 pub fn appearance_key(kind: &EntityKind) -> Option<AppearanceKey> {
     match kind {
         EntityKind::Npc { npc_id, .. } => Some(AppearanceKey::Npc { npc_id: *npc_id, equipped: equipped(kind) }),
         EntityKind::Player { class_id, race, sex, face, hair_style, hair_color, enchant_effect, hero, .. } => {
-            index_for(*race, *sex, *class_id).map(|row| AppearanceKey::Player {
-                row,
+            Some(AppearanceKey::Player {
+                race: *race,
+                class_id: *class_id,
+                sex: *sex,
                 face: *face,
                 hair_style: *hair_style,
                 hair_color: *hair_color,
@@ -244,10 +257,16 @@ pub fn look(key: AppearanceKey, tables: &DatTables) -> Option<Look> {
                 None => Look { appearance: fallback_npc_appearance(), draw_scale: NPC_FALLBACK.draw_scale },
             })
         }
-        AppearanceKey::Player { row, face, hair_style, hair_color, equipped, enchant_effect, hero, mounted } => {
-            tables.chargrp.get(row).map(|template| {
+        AppearanceKey::Player { race, class_id, sex, face, hair_style, hair_color, equipped, enchant_effect, hero, mounted } => {
+            let resolved = if tables.chargrp_high_five.is_empty() {
+                index_for(race, sex, class_id).and_then(|row| tables.chargrp.get(row).map(|template| (row, CharLook::Classic(template))))
+            } else {
+                index_for_high_five(&tables.chargrp_high_five, race, sex, class_id)
+                    .map(|row| (row, CharLook::HighFive(&tables.chargrp_high_five[row])))
+            };
+            resolved.map(|(row, look)| {
                 let player = Player {
-                    template,
+                    look,
                     row,
                     face,
                     hair_style,
@@ -525,11 +544,7 @@ pub fn action_attack_sounds(cache: &mut CharacterCache, victim: &Entity, victim_
     let config = cache.sound_config.clone();
     let mut generator = cache.rand.unwrap_or(crate::world_sound::CrtRand::seeded(0x2545_f491));
     let equipped = killer_world::anim::equipped(&victim.kind);
-    let row = match &victim.kind {
-        EntityKind::Player { class_id, race, sex, .. } => l2_dat::chargrp::index_for(*race, *sex, *class_id),
-        _ => None,
-    };
-    let template = row.and_then(|row| tables.chargrp.get(row));
+    let (defense_sounds, damage_sounds) = player_row_sounds(&victim.kind, tables);
     let item = |id: i32| u32::try_from(id).ok().filter(|id| *id > 0);
     let chest = item(equipped.chest).and_then(|id| tables.armorgrp.get(&id)).map_or(&[][..], |armor| armor.boots_sounds.as_slice());
     let shield = item(equipped.lhand).and_then(|id| tables.weapongrp.get(&id)).map_or(&[][..], |weapon| weapon.attack_sounds.as_slice());
@@ -543,7 +558,7 @@ pub fn action_attack_sounds(cache: &mut CharacterCache, victim: &Entity, victim_
             char_sounds,
         }
     }
-    let own_defense = template.map_or(&[][..], |template| template.defense_sounds.as_slice());
+    let own_defense = defense_sounds;
     let mut plans = Vec::new();
     if hit.shield {
         if victim_pawn {
@@ -562,12 +577,27 @@ pub fn action_attack_sounds(cache: &mut CharacterCache, victim: &Entity, victim_
             position: victim.position,
             npc: matches!(victim.kind, EntityKind::Npc { .. }),
             npc_record: npc_record(tables, &victim.kind),
-            char_sounds: template.map_or(&[][..], |template| template.damage_sounds.as_slice()),
+            char_sounds: damage_sounds,
         };
         plans.extend(plan_damage_sound(&context, &config, || generator.roll()));
     }
     cache.rand = Some(generator);
     cache.sound_plans.extend(plans);
+}
+
+fn player_row_sounds<'a>(kind: &EntityKind, tables: &'a DatTables) -> (&'a [String], &'a [String]) {
+    let EntityKind::Player { class_id, race, sex, .. } = kind else { return (&[], &[]) };
+    if tables.chargrp_high_five.is_empty() {
+        match index_for(*race, *sex, *class_id).and_then(|row| tables.chargrp.get(row)) {
+            Some(template) => (template.defense_sounds.as_slice(), template.damage_sounds.as_slice()),
+            None => (&[], &[]),
+        }
+    } else {
+        match tables.char_row_high_five(*race, *sex, *class_id) {
+            Some(row) => (row.defense_sounds.as_slice(), row.damage_sounds.as_slice()),
+            None => (&[], &[]),
+        }
+    }
 }
 
 pub fn arrow_model(world: &World, attacker: &Entity, tables: &DatTables) -> Option<ArrowModel> {
@@ -2688,7 +2718,7 @@ pub const DEMO_MP: (i32, i32) = (200, 300);
 pub const DEMO_CP: (i32, i32) = (100, 100);
 const DEMO_COLLISION_RADIUS: f32 = 8.0;
 const DEMO_CROWD_SPACING: f32 = 64.0;
-const DEMO_CROWD_FIRST_ID: i32 = 100;
+pub const DEMO_CROWD_FIRST_ID: i32 = 100;
 const DEMO_ABNORMAL_MASKS: [i32; 13] = [0x1, 0x2, 0x4, 0x8, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x800, 0x2000, 0x4000];
 const DEMO_BUFFS: [(i32, u16, i32); 3] = [(1204, 2, 1200), (1040, 3, -1), (1069, 1, 25)];
 const DEMO_SHORT_BUFF: (i32, i32, i32) = (2231, 1, 15);
@@ -3514,13 +3544,13 @@ mod tests {
         let mut shared = Shared::default();
         for (weapon, class) in [(80, "LineageEffect.c_u006"), (150, "LineageEffect.c_u004")] {
             let equipped = Equipped { rhand: weapon, ..Default::default() };
-            let plain = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
+            let plain = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
             let look_plain = look(plain, &tables).unwrap();
             assert_eq!(look_plain.appearance.weapon_effects.len(), 1);
             assert_eq!(look_plain.appearance.weapon_effects[0].class, class);
             let LoadResult::Character { effects, .. } = load_character(&mut client, &mut shared, plain, &look_plain.appearance, look_plain.draw_scale) else { panic!("carga") };
             assert!(effects.effects.is_empty(), "EnchantEffectShow=1 exige +1");
-            let key = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 16, hero: false, mounted: 0 };
+            let key = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 16, hero: false, mounted: 0 };
             let look = look(key, &tables).unwrap();
             let LoadResult::Character { parts, animation, draw_scale, weapon_type, mut bank, effects: load, .. } = load_character(&mut client, &mut shared, key, &look.appearance, look.draw_scale) else { panic!("carga") };
             let crate::loader::EffectLoad { effects, bank: mut effect_bank } = *load;
@@ -3601,11 +3631,11 @@ mod tests {
         let tables = client.tables().unwrap();
         let timeenv = TimeEnv::load(&mut client, 0).unwrap();
         let mut shared = Shared::default();
-        let plain = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped: Equipped::default(), enchant_effect: 0, hero: false, mounted: 0 };
+        let plain = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped: Equipped::default(), enchant_effect: 0, hero: false, mounted: 0 };
         let look_plain = look(plain, &tables).unwrap();
         let LoadResult::Character { effects, .. } = load_character(&mut client, &mut shared, plain, &look_plain.appearance, look_plain.draw_scale) else { panic!("carga") };
         assert!(effects.effects.is_empty());
-        let key = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped: Equipped::default(), enchant_effect: 0, hero: true, mounted: 0 };
+        let key = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped: Equipped::default(), enchant_effect: 0, hero: true, mounted: 0 };
         let look = look(key, &tables).unwrap();
         let LoadResult::Character { parts, animation, draw_scale, weapon_type, mut bank, effects: load, .. } = load_character(&mut client, &mut shared, key, &look.appearance, look.draw_scale) else { panic!("carga") };
         let crate::loader::EffectLoad { effects, bank: mut effect_bank } = *load;
@@ -3675,7 +3705,7 @@ mod tests {
         let timeenv = TimeEnv::load(&mut client, 0).unwrap();
         let mut shared = Shared::default();
         let equipped = Equipped { rhand: 1, ..Default::default() };
-        let key = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
+        let key = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
         let look = look(key, &tables).unwrap();
         let LoadResult::Character { parts, animation, draw_scale, weapon_type, mut bank, .. } = load_character(&mut client, &mut shared, key, &look.appearance, look.draw_scale) else { panic!("carga") };
         let mut gpu = Headless::new(512, 512).unwrap();
@@ -4055,7 +4085,7 @@ mod tests {
         let mut captures = Vec::new();
         for level in [0, 20] {
             let equipped = Equipped { rhand: 1, lhand: 18, ..Default::default() };
-            let key = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: level, hero: false, mounted: 0 };
+            let key = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: level, hero: false, mounted: 0 };
             let look = look(key, &tables).unwrap();
             let LoadResult::Character { parts, animation, draw_scale, weapon_type, mut bank, .. } = load_character(&mut client, &mut shared, key, &look.appearance, look.draw_scale) else { panic!("carga") };
             let auras = parts.iter().filter(|p| matches!(p.placement, Placement::Enchanted { .. })).count();
@@ -4116,9 +4146,9 @@ mod tests {
         let mut shared = Shared::default();
         let out_dir=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/preparation-validation/killer-robe");
         std::fs::create_dir_all(&out_dir).unwrap();
-        for row in 0..14 {
+        for (row, &(race, class_id, sex)) in CLASSIC_ROW_IDENTITY.iter().enumerate() {
             let equipped = Equipped { head: 8063, chest: 8064, legs: 8065, gloves: 8066, feet: 8067, ..Default::default() };
-            let key = AppearanceKey::Player { row, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
+            let key = AppearanceKey::Player { race, class_id, sex, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 };
             let look = look(key, &tables).unwrap();
             let LoadResult::Character { parts, animation, draw_scale, weapon_type, mut bank, .. } = load_character(&mut client, &mut shared, key, &look.appearance, look.draw_scale) else { panic!("carga") };
             assert_eq!(parts.len(),look.appearance.parts.len(),"row {row}: parte descartada");
@@ -4190,7 +4220,7 @@ mod tests {
             } else {
                 Equipped { rhand: weapon.id as i32, ..Default::default() }
             };
-            let key = AppearanceKey::Player { row: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 20, hero: false, mounted: 0 };
+            let key = AppearanceKey::Player { race: 0, class_id: 0, sex: 0, face: 0, hair_style: 0, hair_color: 0, equipped, enchant_effect: 20, hero: false, mounted: 0 };
             let appearance = look(key, &tables).unwrap().appearance;
             for part in &appearance.parts {
                 let Placement::Enchanted { scale, offset, hero, .. } = part.placement else { continue };
@@ -4367,8 +4397,30 @@ mod tests {
         DatTables::default()
     }
 
+    const CLASSIC_ROW_IDENTITY: [(i32, i32, i32); 14] = [
+        (0, 0, 0),
+        (0, 0, 1),
+        (2, 31, 0),
+        (2, 31, 1),
+        (4, 53, 0),
+        (4, 53, 1),
+        (1, 18, 0),
+        (1, 18, 1),
+        (0, 10, 0),
+        (0, 10, 1),
+        (3, 44, 0),
+        (3, 44, 1),
+        (3, 49, 0),
+        (3, 49, 1),
+    ];
+
+    fn player_key_for(row: usize, face: i32, equipped: Equipped) -> AppearanceKey {
+        let (race, class_id, sex) = CLASSIC_ROW_IDENTITY[row];
+        AppearanceKey::Player { race, class_id, sex, face, hair_style: 0, hair_color: 0, equipped, enchant_effect: 0, hero: false, mounted: 0 }
+    }
+
     fn player_key(row: usize, face: i32) -> AppearanceKey {
-        AppearanceKey::Player { row, face, hair_style: 0, hair_color: 0, equipped: Equipped::default(), enchant_effect: 0, hero: false, mounted: 0 }
+        player_key_for(row, face, Equipped::default())
     }
 
     fn npc_key(npc_id: i32) -> AppearanceKey {
@@ -4646,9 +4698,23 @@ mod tests {
             Some(AppearanceKey::Npc { npc_id: 1, equipped: Equipped { rhand: 5, lhand: 6, ..Default::default() } })
         );
         assert_eq!(appearance_key(&player_kind(0, 0, 0, 2)), Some(player_key(0, 2)));
-        assert_eq!(appearance_key(&player_kind(97, 0, 1, 0)), Some(player_key(9, 0)));
+        assert_eq!(
+            appearance_key(&player_kind(97, 0, 1, 0)),
+            Some(AppearanceKey::Player {
+                race: 0,
+                class_id: 97,
+                sex: 1,
+                face: 0,
+                hair_style: 0,
+                hair_color: 0,
+                equipped: Equipped::default(),
+                enchant_effect: 0,
+                hero: false,
+                mounted: 0,
+            })
+        );
         assert_eq!(appearance_key(&player_kind(49, 3, 0, 1)), Some(player_key(12, 1)));
-        assert_eq!(appearance_key(&player_kind(0, 9, 0, 0)), None);
+        assert!(appearance_key(&player_kind(0, 9, 0, 0)).is_some());
     }
 
     #[test]
@@ -4673,6 +4739,84 @@ mod tests {
         assert_eq!(rabbit.draw_scale, NPC_FALLBACK.draw_scale);
         assert_eq!(look(npc_key(-1), &tables).unwrap().draw_scale, NPC_FALLBACK.draw_scale);
         assert!(look(player_key(0, 0), &tables).is_none());
+    }
+
+    fn high_five_row(name: &str, race: u32, class_id: u32, sex: u32) -> l2_dat::chargrp::CharRowHighFive {
+        use l2_dat::chargrp::{BodyPartHighFive, CharRowHighFive, HAIR_BLOCKS_HIGH_FIVE, HAIR_SLOTS_HIGH_FIVE, HAIR_STYLES_HIGH_FIVE};
+        let mut hair = vec![String::new(); HAIR_BLOCKS_HIGH_FIVE * HAIR_STYLES_HIGH_FIVE * HAIR_SLOTS_HIGH_FIVE];
+        hair[0] = format!("{name}.m00_ah");
+        hair[1] = format!("{name}.t00_m00_ah");
+        hair[2] = format!("{name}.m00_bh");
+        hair[3] = format!("{name}.t00_m00_bh");
+        let body = |suffix: &str| BodyPartHighFive {
+            meshes: vec![format!("{name}.{suffix}")],
+            textures: vec![format!("{name}.t00_{suffix}")],
+            ex_meshes: vec![],
+            ex_textures: vec![],
+        };
+        CharRowHighFive {
+            hair,
+            face_meshes: vec![format!("{name}.f"); 3],
+            face_textures: (0..3).map(|i| format!("{name}.t0{i}_f")).collect(),
+            body_parts: [body("g"), body("u"), body("l"), body("b")],
+            damage_effect: "LineageEffect.p_u002_a".into(),
+            walk_anim_frame: 12,
+            attack_sounds: vec![],
+            defense_sounds: vec![],
+            damage_sounds: vec![],
+            voice_sounds: Default::default(),
+            voice_extra: 0,
+            name: name.to_string(),
+            race,
+            class_id,
+            sex,
+            extra_names: [vec![], vec![]],
+        }
+    }
+
+    #[test]
+    fn high_five_player_look_draws_body_hair_and_face_for_every_known_race_and_sex() {
+        let mut tables = empty_tables();
+        tables.chargrp_high_five = vec![
+            high_five_row("MFighter", 0, 0, 0),
+            high_five_row("FFighter", 0, 0, 1),
+            high_five_row("MDarkElf", 2, 31, 0),
+            high_five_row("FElf", 1, 18, 1),
+            high_five_row("MOrc", 3, 44, 0),
+            high_five_row("FDwarf", 4, 53, 1),
+            high_five_row("MKamael", 0, 123, 0),
+            high_five_row("FKamael", 0, 124, 1),
+        ];
+        for (race, class_id, sex, name) in [
+            (0, 0, 0, "MFighter"),
+            (0, 0, 1, "FFighter"),
+            (2, 31, 0, "MDarkElf"),
+            (1, 18, 1, "FElf"),
+            (3, 44, 0, "MOrc"),
+            (4, 53, 1, "FDwarf"),
+            (5, 123, 0, "MKamael"),
+            (5, 124, 1, "FKamael"),
+        ] {
+            let key = appearance_key(&player_kind(class_id, race, sex, 0)).unwrap();
+            let look = look(key, &tables).unwrap_or_else(|| panic!("{name}: linha H5 não resolveu"));
+            use killer_assets::pawn::{SLOT_BODY, SLOT_BOOTS, SLOT_FACE, SLOT_GLOVES, SLOT_LEGS};
+            for (slot, suffix) in [(SLOT_BODY, "u"), (SLOT_LEGS, "l"), (SLOT_GLOVES, "g"), (SLOT_BOOTS, "b")] {
+                let part = look.appearance.part(slot).unwrap_or_else(|| panic!("{name}: slot {slot} sem malha"));
+                assert_eq!(part.mesh, format!("{name}.{suffix}"));
+            }
+            let hair = look.appearance.part(SLOT_HAIR_B).unwrap_or_else(|| panic!("{name}: sem cabelo"));
+            assert_eq!(hair.mesh, format!("{name}.m00_bh"));
+            let face = look.appearance.part(SLOT_FACE).unwrap_or_else(|| panic!("{name}: sem rosto"));
+            assert_eq!(face.mesh, format!("{name}.f"));
+        }
+    }
+
+    #[test]
+    fn high_five_player_look_is_none_without_a_matching_row() {
+        let mut tables = empty_tables();
+        tables.chargrp_high_five = vec![high_five_row("MFighter", 0, 0, 0)];
+        let key = appearance_key(&player_kind(999, 7, 0, 0)).unwrap();
+        assert!(look(key, &tables).is_none());
     }
 
     #[test]
@@ -4785,6 +4929,7 @@ mod tests {
                 ani_char: "B".into(),
                 visual_effect: String::new(),
                 icon: String::new(),
+                icon_type: None,
                 extra_eff: 0,
                 is_ench: 0,
                 ench_skill_id: 0,
@@ -4975,6 +5120,7 @@ mod tests {
             ani_char: "S".into(),
             visual_effect: String::new(),
             icon: String::new(),
+            icon_type: None,
             extra_eff: 0,
             is_ench: 0,
             ench_skill_id: 0,
@@ -5343,7 +5489,9 @@ mod tests {
         assert_eq!(
             appearance_key(&me.kind),
             Some(AppearanceKey::Player {
-                row: 0,
+                race: 0,
+                class_id: 0,
+                sex: 0,
                 face: 0,
                 hair_style: 1,
                 hair_color: 1,
@@ -5423,17 +5571,23 @@ mod tests {
             1,
             entity(EntityKind::Npc { npc_id: 1, rhand: 0, chest: 0, lhand: 0, attackable: false }, Vec3::ZERO),
         );
+        let unresolved = appearance_key(&player_kind(0, 9, 0, 0)).unwrap();
         world.entities.insert(2, entity(player_kind(0, 9, 0, 0), Vec3::ZERO));
         assert!(
             instances(&mut world, &mut cache, &tables, &frame(0.016), |_| 0, |_| Sample::default(), |_, _| true).is_empty()
         );
-        assert_eq!(cache.take_wanted(usize::MAX), [npc_key(1)]);
-        assert!(cache.is_pending(npc_key(1)));
+        let mut wanted = cache.take_wanted(usize::MAX);
+        wanted.sort_by_key(|key| format!("{key:?}"));
+        let mut expected = vec![npc_key(1), unresolved];
+        expected.sort_by_key(|key| format!("{key:?}"));
+        assert_eq!(wanted, expected);
+        assert!(cache.is_pending(npc_key(1)) && cache.is_pending(unresolved));
         assert!(
             instances(&mut world, &mut cache, &tables, &frame(0.016), |_| 0, |_| Sample::default(), |_, _| true).is_empty()
         );
         assert!(cache.take_wanted(usize::MAX).is_empty());
         cache.fail(npc_key(1));
+        cache.fail(unresolved);
         instances(&mut world, &mut cache, &tables, &frame(0.016), |_| 0, |_| Sample::default(), |_, _| true);
         assert!(cache.take_wanted(usize::MAX).is_empty());
         world.entities.insert(

@@ -69,6 +69,7 @@ pub struct WebClient {
     network: crate::network::Network,
     validate: crate::pace::ValidatePacer,
     previous_time: Option<f32>,
+    demo_crowd: (usize,bool),
 }
 
 fn error(value: impl std::fmt::Display) -> JsValue {
@@ -136,6 +137,11 @@ impl WebClient {
 
     pub fn performance_stats(&mut self) -> String {
         let frames=self.render_frames.max(1) as f64;
+        let loads=self.runtime.as_mut().map_or(serde_json::Value::Null,|runtime|{
+            let value=serde_json::json!({"count":runtime.loads,"total":runtime.load_total,"worst":runtime.load_worst});
+            runtime.loads=0;runtime.load_total=0.0;runtime.load_worst=0.0;
+            value
+        });
         let (stages,entities)=self.runtime.as_mut().map_or(([0.0;4],0),|runtime| {
             let count=runtime.profile_frames.max(1) as f64;
             runtime.profile_frames=0;
@@ -144,7 +150,7 @@ impl WebClient {
         });
         let ground=self.runtime.as_ref().and_then(crate::runtime::Runtime::ground_diagnostic);
         let panels:Vec<_>=self.runtime.as_ref().map(|runtime|runtime.ui.desktop.windows.iter().filter(|window|window.visible).map(|window|[window.rect.x,window.rect.y,window.rect.w,window.rect.h]).collect()).unwrap_or_default();
-        let result=serde_json::json!({"panels":panels,"ground":ground,"stages":stages,"render":self.render_ms/frames,"hud":self.hud_ms/frames,"entities":entities,"pieces":self.renderer.instance_count(),"simd":cfg!(target_feature="simd128")});
+        let result=serde_json::json!({"loads":loads,"panels":panels,"ground":ground,"stages":stages,"render":self.render_ms/frames,"hud":self.hud_ms/frames,"entities":entities,"pieces":self.renderer.instance_count(),"simd":cfg!(target_feature="simd128")});
         self.render_ms=0.0;self.hud_ms=0.0;self.render_frames=0;
         result.to_string()
     }
@@ -427,7 +433,7 @@ impl WebClient {
             network: Default::default(),
             validate: Default::default(),
             camera: Camera { eye: Vec3::new(81000.0,146000.0,-2200.0), target: Vec3::new(83400.0,148000.0,-3400.0),
-                fov_x_deg: 60.0, near: 10.0, far: 60000.0 }, previous_time: None })
+                fov_x_deg: 60.0, near: 10.0, far: 60000.0 }, previous_time: None, demo_crowd: (0,false) })
     }
 
     pub fn load_scene(&mut self, name: &str, bytes: &[u8], size: u64, hash: u64) -> Result<(), JsValue> {
@@ -503,6 +509,8 @@ impl WebClient {
 
     pub fn enable_background_loading(&mut self) { self.background_loading = true; }
 
+    pub fn set_demo_crowd(&mut self, crowd: u32, varied: bool) { self.demo_crowd = (crowd as usize,varied); }
+
     pub fn finish_world(&mut self, scene: Option<web_sys::Blob>, trace: Option<web_sys::Blob>) -> Result<String,JsValue> {
         let (tile,spawn,heading) = self.pending_world.clone().ok_or_else(|| error("nenhum carregamento pendente"))?;
         self.load_world(&tile,Some((spawn,heading)),scene,trace)?;
@@ -561,7 +569,7 @@ impl WebClient {
         client.catalog().release_files();
         let upload_ms = started.elapsed().as_secs_f64() * 1000.0;
         report("upload", upload_ms);
-        let mut runtime = crate::runtime::Runtime::new(client,loaded.level,scene,&self.renderer,self.config.format,(self.config.width,self.config.height),self.scale,spawn,trace,&mut self.table_cache).map_err(error)?;
+        let mut runtime = crate::runtime::Runtime::new(client,loaded.level,scene,&self.renderer,self.config.format,(self.config.width,self.config.height),self.scale,spawn,trace,&mut self.table_cache,self.demo_crowd).map_err(error)?;
         let runtime_ms = started.elapsed().as_secs_f64() * 1000.0;
         report("runtime", runtime_ms);
         runtime.initialize_video(&mut self.renderer,&self.adapter,video).map_err(error)?;

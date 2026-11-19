@@ -21,6 +21,108 @@ pub struct CharTemplate {
 
 pub const VOICE_GROUPS: usize = 8;
 
+pub const HAIR_BLOCKS_HIGH_FIVE: usize = 5;
+pub const HAIR_STYLES_HIGH_FIVE: usize = 15;
+pub const HAIR_SLOTS_HIGH_FIVE: usize = 4;
+pub const VOICE_GROUPS_HIGH_FIVE: usize = 11;
+pub const BODY_PARTS_HIGH_FIVE: usize = 4;
+const UNUSED_NAMES_HIGH_FIVE: usize = 90;
+const UNUSED_BYTES_HIGH_FIVE: usize = 90;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BodyPartHighFive {
+    pub meshes: Vec<String>,
+    pub textures: Vec<String>,
+    pub ex_meshes: Vec<String>,
+    pub ex_textures: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CharRowHighFive {
+    pub hair: Vec<String>,
+    pub face_meshes: Vec<String>,
+    pub face_textures: Vec<String>,
+    pub body_parts: [BodyPartHighFive; BODY_PARTS_HIGH_FIVE],
+    pub damage_effect: String,
+    pub walk_anim_frame: u32,
+    pub attack_sounds: Vec<String>,
+    pub defense_sounds: Vec<String>,
+    pub damage_sounds: Vec<String>,
+    pub voice_sounds: [Vec<String>; VOICE_GROUPS_HIGH_FIVE],
+    pub voice_extra: u32,
+    pub name: String,
+    pub race: u32,
+    pub class_id: u32,
+    pub sex: u32,
+    pub extra_names: [Vec<String>; 2],
+}
+
+impl CharRowHighFive {
+    pub fn hair(&self, block: usize, style: usize, slot: usize) -> Option<&str> {
+        if block >= HAIR_BLOCKS_HIGH_FIVE || style >= HAIR_STYLES_HIGH_FIVE || slot >= HAIR_SLOTS_HIGH_FIVE {
+            return None;
+        }
+        let index = (block * HAIR_STYLES_HIGH_FIVE + style) * HAIR_SLOTS_HIGH_FIVE + slot;
+        self.hair.get(index).map(String::as_str).filter(|name| !name.is_empty())
+    }
+}
+
+pub fn read_high_five(body: &[u8]) -> Result<Vec<CharRowHighFive>, Error> {
+    let mut reader = DatReader::new(body);
+    let mut rows = Vec::new();
+    while reader.remaining() > FOOTER_LEN {
+        rows.push(record_high_five(&mut reader)?);
+    }
+    Ok(rows)
+}
+
+const FOOTER_LEN: usize = 13;
+
+fn record_high_five(r: &mut DatReader<'_>) -> Result<CharRowHighFive, Error> {
+    let hair = (0..HAIR_BLOCKS_HIGH_FIVE * HAIR_STYLES_HIGH_FIVE * HAIR_SLOTS_HIGH_FIVE).map(|_| r.unicode()).collect::<Result<Vec<_>, _>>()?;
+    let face_meshes = r.unicode_array()?;
+    let face_textures = r.unicode_array()?;
+    for _ in 0..UNUSED_NAMES_HIGH_FIVE {
+        r.unicode()?;
+    }
+    let mut body_parts: [BodyPartHighFive; BODY_PARTS_HIGH_FIVE] = Default::default();
+    for part in &mut body_parts {
+        part.meshes = r.unicode_array()?;
+        part.textures = r.unicode_array()?;
+        part.ex_meshes = r.unicode_array()?;
+        part.ex_textures = r.unicode_array()?;
+        r.skip(2 + 2 * part.ex_meshes.len())?;
+    }
+    r.skip(UNUSED_BYTES_HIGH_FIVE)?;
+    let damage_effect = r.unicode()?;
+    let walk_anim_frame = r.u32()?;
+    let [attacks, defenses, damages] = [r.u32()?, r.u32()?, r.u32()?];
+    let attack_sounds = strings(r, attacks)?;
+    let defense_sounds = strings(r, defenses)?;
+    let damage_sounds = strings(r, damages)?;
+    let mut voice_sounds: [Vec<String>; VOICE_GROUPS_HIGH_FIVE] = Default::default();
+    for group in &mut voice_sounds {
+        *group = r.unicode_array()?;
+    }
+    let voice_extra = r.u32()?;
+    let name = r.ascf()?;
+    let race = r.u32()?;
+    let class_id = r.u32()?;
+    let sex = r.u32()?;
+    let extra_names = [r.unicode_array()?, r.unicode_array()?];
+    Ok(CharRowHighFive { hair, face_meshes, face_textures, body_parts, damage_effect, walk_anim_frame, attack_sounds, defense_sounds, damage_sounds, voice_sounds, voice_extra, name, race, class_id, sex, extra_names })
+}
+
+pub fn index_for_high_five(rows: &[CharRowHighFive], race: i32, sex: i32, class_id: i32) -> Option<usize> {
+    let (race, sex, class_id) = (u32::try_from(race).ok()?, u32::try_from(sex).ok()?, u32::try_from(class_id).ok()?);
+    if let Some(index) = rows.iter().position(|row| row.class_id == class_id && row.sex == sex) {
+        return Some(index);
+    }
+    let mut same_race = rows.iter().enumerate().filter(|(_, row)| row.race == race && row.sex == sex);
+    let first = same_race.next()?;
+    same_race.next().is_none().then_some(first.0)
+}
+
 pub fn read(body: &[u8]) -> Result<Vec<CharTemplate>, Error> {
     let mut reader = DatReader::new(body);
     let mut rows = Vec::with_capacity(ROWS);

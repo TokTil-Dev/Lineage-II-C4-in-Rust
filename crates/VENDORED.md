@@ -66,3 +66,8 @@ Alterações locais (mantidas mínimas; descrever cada uma aqui):
   é o próprio `std::fs`; no Worker WASM usa arquivos selecionados pelo usuário,
   com `Read + Seek` via Blob/FileReaderSync. Não altera decifragem nem formatos.
   Evidência: `docs/evidence/web-platform.md`.
+- `l2-catalog`: `read_index` abre o índice de um pacote com cifra por byte (`Lineage2Ver111`/`121`) sem somar o CRC do arquivo
+  inteiro. O `Window::payload_len` (CRC de todo o arquivo para decidir se os 20 bytes finais são o rodapé assinado) só roda quando
+  a leitura das tabelas ou o fim de algum export encosta nesses 20 bytes; nos demais casos o resultado é o mesmo com qualquer um
+  dos dois tamanhos. `Catalog::begin_attempt`/`finish_attempt` desfazem os caches escritos numa tentativa de carga adiada.
+  `l2-crypto::TRAILER_LEN` ficou público. Medições e testes em `docs/evidence/web-platform.md` §"Carga de personagens sem bloquear o quadro".

@@ -28,7 +28,7 @@ pub enum Node {
     Font { color: Option<Argb>, children: Vec<Node> },
     Link { action: String, children: Vec<Node> },
     Center(Vec<Node>),
-    Table { width: Option<i32>, rows: Vec<Vec<Cell>> },
+    Table { width: Option<i32>, rows: Vec<Vec<Cell>>, attrs: TableAttrs },
     Img { src: String, width: i32, height: i32 },
     Button { value: String, action: String, width: i32, height: i32, back: String, fore: String },
     Edit { var: String, width: i32, height: i32, multi: bool },
@@ -37,7 +37,19 @@ pub enum Node {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Cell {
     pub width: Option<i32>,
+    pub align: Option<String>,
+    pub valign: Option<String>,
     pub children: Vec<Node>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TableAttrs {
+    pub border: i32,
+    pub cellpadding: i32,
+    pub cellspacing: i32,
+    pub height: Option<i32>,
+    pub bgcolor: Option<Argb>,
+    pub align: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -365,9 +377,9 @@ enum Kind {
     Font(Option<Argb>),
     Link(String),
     Center,
-    Table { width: Option<i32>, rows: Vec<Vec<Cell>> },
+    Table { width: Option<i32>, rows: Vec<Vec<Cell>>, attrs: TableAttrs },
     Row(Vec<Cell>),
-    Cell(Option<i32>),
+    Cell { width: Option<i32>, align: Option<String>, valign: Option<String> },
 }
 
 struct Frame {
@@ -470,7 +482,18 @@ impl<'a> Builder<'a> {
                 multi: name == "MULTIEDIT",
             }),
             "TABLE" => self.stack.push(Frame {
-                kind: Kind::Table { width: attr_int(attrs, "WIDTH"), rows: Vec::new() },
+                kind: Kind::Table {
+                    width: attr_int(attrs, "WIDTH"),
+                    rows: Vec::new(),
+                    attrs: TableAttrs {
+                        border: attr_int(attrs, "BORDER").unwrap_or(0),
+                        cellpadding: attr_int(attrs, "CELLPADDING").unwrap_or(0),
+                        cellspacing: attr_int(attrs, "CELLSPACING").unwrap_or(0),
+                        height: attr_int(attrs, "HEIGHT"),
+                        bgcolor: attr(attrs, "BGCOLOR").map(font_color),
+                        align: attr(attrs, "ALIGN").map(str::to_string),
+                    },
+                },
                 children: Vec::new(),
             }),
             "TR" if self.close_to(|kind| matches!(kind, Kind::Table { .. }), false) => {
@@ -481,7 +504,9 @@ impl<'a> Builder<'a> {
                     self.stack.push(Frame { kind: Kind::Row(Vec::new()), children: Vec::new() });
                 }
                 let width = attr_int(attrs, "WIDTH").or_else(|| attr_int(attrs, "FIXWIDTH"));
-                self.stack.push(Frame { kind: Kind::Cell(width), children: Vec::new() });
+                let align = attr(attrs, "ALIGN").map(str::to_string);
+                let valign = attr(attrs, "VALIGN").map(str::to_string);
+                self.stack.push(Frame { kind: Kind::Cell { width, align, valign }, children: Vec::new() });
             }
             "TITLE" => self.in_title = true,
             _ => {}
@@ -502,7 +527,7 @@ impl<'a> Builder<'a> {
                 self.close_to(|kind| matches!(kind, Kind::Center), true);
             }
             "TD" => {
-                self.close_to(|kind| matches!(kind, Kind::Cell(_)), true);
+                self.close_to(|kind| matches!(kind, Kind::Cell { .. }), true);
             }
             "TR" => {
                 self.close_to(|kind| matches!(kind, Kind::Row(_)), true);
@@ -533,15 +558,15 @@ impl<'a> Builder<'a> {
             Kind::Font(color) => parent.children.push(Node::Font { color, children: frame.children }),
             Kind::Link(action) => parent.children.push(Node::Link { action, children: frame.children }),
             Kind::Center => parent.children.push(Node::Center(frame.children)),
-            Kind::Table { width, rows } => parent.children.push(Node::Table { width, rows }),
+            Kind::Table { width, rows, attrs } => parent.children.push(Node::Table { width, rows, attrs }),
             Kind::Row(cells) => {
                 if let Kind::Table { rows, .. } = &mut parent.kind {
                     rows.push(cells);
                 }
             }
-            Kind::Cell(width) => {
+            Kind::Cell { width, align, valign } => {
                 if let Kind::Row(cells) = &mut parent.kind {
-                    cells.push(Cell { width, children: frame.children });
+                    cells.push(Cell { width, align, valign, children: frame.children });
                 }
             }
         }
@@ -1022,11 +1047,12 @@ mod tests {
                 width: Some(260),
                 rows: vec![
                     vec![
-                        Cell { width: Some(40), children: vec![Node::Text("a".into())] },
-                        Cell { width: None, children: vec![Node::Text("b".into())] }
+                        Cell { width: Some(40), children: vec![Node::Text("a".into())], ..Default::default() },
+                        Cell { width: None, children: vec![Node::Text("b".into())], ..Default::default() }
                     ],
-                    vec![Cell { width: Some(60), children: vec![Node::Text("c".into())] }],
-                ]
+                    vec![Cell { width: Some(60), children: vec![Node::Text("c".into())], ..Default::default() }],
+                ],
+                attrs: TableAttrs::default(),
             }
         );
         assert_eq!(doc.body[2], Node::Img { src: "L2UI.SquareWhite".into(), width: 270, height: 1 });

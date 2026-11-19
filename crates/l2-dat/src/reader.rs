@@ -14,6 +14,15 @@ impl<'a> DatReader<'a> {
         Ok(self.inner.u8()?)
     }
 
+    pub fn skip(&mut self, len: usize) -> Result<(), Error> {
+        self.inner.bytes(len)?;
+        Ok(())
+    }
+
+    pub fn u16(&mut self) -> Result<u16, Error> {
+        Ok(self.inner.u16()?)
+    }
+
     pub fn u32(&mut self) -> Result<u32, Error> {
         Ok(self.inner.u32()?)
     }
@@ -47,6 +56,11 @@ impl<'a> DatReader<'a> {
     pub fn unicode_array(&mut self) -> Result<Vec<String>, Error> {
         let len = self.inner.u32()?;
         (0..len).map(|_| self.unicode()).collect()
+    }
+
+    pub fn u32_array(&mut self) -> Result<Vec<u32>, Error> {
+        let len = self.inner.u32()?;
+        (0..len).map(|_| self.u32()).collect()
     }
 
     pub fn remaining(&self) -> usize {

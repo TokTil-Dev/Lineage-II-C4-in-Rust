@@ -9,3 +9,5 @@ license.workspace = true
 thiserror.workspace = true
 blowfish.workspace = true
 cipher.workspace = true
+l2-dat = { path = "../l2-dat" }
+num-bigint.workspace = true

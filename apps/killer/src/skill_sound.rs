@@ -85,8 +85,8 @@ mod tests {
 
     fn record() -> SkillSound {
         let empty = || sound("", 0.0, 0.0);
-        let mut cast: [String; 15] = std::array::from_fn(|_| String::new());
-        let mut magic: [String; 15] = std::array::from_fn(|_| String::new());
+        let mut cast = vec![String::new(); 15];
+        let mut magic = vec![String::new(); 15];
         cast[0] = "ChrSound.m_hfighter_sub".into();
         magic[2] = "ChrSound.m_darkelf_magic".into();
         SkillSound {

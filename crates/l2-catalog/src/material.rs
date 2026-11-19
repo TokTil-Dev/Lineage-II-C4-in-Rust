@@ -1554,6 +1554,9 @@ impl Catalog {
             };
         }
         let chain = std::sync::Arc::new(chain);
+        if let Some(attempt) = &mut self.attempt {
+            attempt.class_defaults.push(key.clone());
+        }
         self.class_defaults.insert(key, chain.clone());
         chain
     }

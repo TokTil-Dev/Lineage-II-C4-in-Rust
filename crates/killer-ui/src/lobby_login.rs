@@ -194,6 +194,7 @@ pub struct LoginScreen {
     pub card_prompt: String,
     pub logo: String,
     pub mini_logo: String,
+    pub host_function: Option<Vec<(usize, Rect)>>,
 }
 
 impl LoginScreen {
@@ -213,6 +214,7 @@ impl LoginScreen {
             card_prompt: String::new(),
             logo: LOGO.to_string(),
             mini_logo: MINI_LOGO.to_string(),
+            host_function: None,
         }
     }
 
@@ -261,9 +263,15 @@ impl LoginScreen {
 
     pub fn hit(&self, x: i32, y: i32) -> Option<Hit> {
         let function = self.function_origin();
-        for (index, rect) in FUNCTION_BUTTON_RECTS.iter().enumerate() {
-            if rect.offset(function.0, function.1).contains(x, y) {
-                return Some(Hit::Function(index));
+        if let Some(host) = &self.host_function {
+            if let Some((index, _)) = host.iter().find(|(_, rect)| rect.contains(x, y)) {
+                return Some(Hit::Function(*index));
+            }
+        } else {
+            for (index, rect) in FUNCTION_BUTTON_RECTS.iter().enumerate() {
+                if rect.offset(function.0, function.1).contains(x, y) {
+                    return Some(Hit::Function(index));
+                }
             }
         }
         if !self.auth_visible {
@@ -426,6 +434,9 @@ impl LoginScreen {
     }
 
     fn paint_function(&self, list: &mut DrawList, font: &BitmapFont) {
+        if self.host_function.is_some() {
+            return;
+        }
         let (ox, oy) = self.function_origin();
         list.draw_texture(ox, oy, FUNCTION_SIZE.0, FUNCTION_SIZE.1, 0, 0, FUNCTION_SIZE.0, FUNCTION_SIZE.1, FUNCTION_BACK, 1.0);
         for (index, rect) in FUNCTION_BUTTON_RECTS.iter().enumerate() {

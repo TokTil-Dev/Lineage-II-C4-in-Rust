@@ -12,3 +12,6 @@ l2-crypto = { path = "../l2-crypto" }
 ue2-assets = { path = "../ue2-assets" }
 ue2-package = { path = "../ue2-package" }
 ue2-core = { path = "../ue2-core" }
+
+[dev-dependencies]
+flate2.workspace = true

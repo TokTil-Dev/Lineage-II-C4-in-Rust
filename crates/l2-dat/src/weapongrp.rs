@@ -1,4 +1,4 @@
-use crate::armorgrp::item_head;
+use crate::armorgrp::item_head_as;
 use crate::{DatReader, Error};
 
 pub mod anim_type {
@@ -80,7 +80,7 @@ fn record(r: &mut DatReader<'_>) -> Result<Weapon, Error> {
 }
 
 fn record_as(r: &mut DatReader<'_>, chronicle: crate::Chronicle) -> Result<Weapon, Error> {
-    let head = item_head(r)?;
+    let head = item_head_as(r, chronicle)?;
     let mut weapon = body_as(r, head.id, chronicle)?;
     weapon.crystallizable = head.crystallizable;
     Ok(weapon)
@@ -94,6 +94,11 @@ pub fn body_as(r: &mut DatReader<'_>, id: u32, chronicle: crate::Chronicle) -> R
     let body_part = r.u32()?;
     let handness = r.u32()?;
     let meshes = r.unicode_array()?;
+    if chronicle == crate::Chronicle::HighFive {
+        for _ in 0..meshes.len() {
+            r.u32()?;
+        }
+    }
     let textures = r.unicode_array()?;
     let attack_sounds = r.unicode_array()?;
     let drop_sound = r.unicode()?;
@@ -136,8 +141,13 @@ pub fn body_as(r: &mut DatReader<'_>, id: u32, chronicle: crate::Chronicle) -> R
     for enchant in &mut enchant_meshes {
         enchant.vector_154 = [r.f32()?, r.f32()?, r.f32()?];
     }
-    if chronicle == crate::Chronicle::Interlude {
-        for _ in 0..4 {
+    let appendix = match chronicle {
+        crate::Chronicle::C4 => 0,
+        crate::Chronicle::Interlude => 4,
+        crate::Chronicle::HighFive => 6,
+    };
+    if appendix != 0 {
+        for _ in 0..appendix {
             r.i32()?;
         }
         for _ in 0..4 {

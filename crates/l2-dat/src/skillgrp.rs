@@ -6,6 +6,7 @@ use std::ops::{Deref, DerefMut};
 pub struct Skill {
     pub id: u32,
     pub level: u32,
+    pub icon_type: Option<u32>,
     pub oper_type: u32,
     pub mp_consume: u32,
     pub cast_range: i32,
@@ -59,9 +60,23 @@ impl SkillTip {
     }
 }
 
+pub const ICON_TYPE_ACTIVE_GROUPS: std::ops::RangeInclusive<u32> = 0..=7;
+pub const ICON_TYPE_PASSIVE_GROUPS: std::ops::RangeInclusive<u32> = 11..=16;
+
 impl Skill {
     pub fn is_debuff(&self) -> bool {
         self.extra_eff != 0
+    }
+
+    pub fn icon_group(&self) -> Option<(bool, u32)> {
+        let icon_type = self.icon_type?;
+        if ICON_TYPE_ACTIVE_GROUPS.contains(&icon_type) {
+            return Some((false, icon_type - ICON_TYPE_ACTIVE_GROUPS.start()));
+        }
+        if ICON_TYPE_PASSIVE_GROUPS.contains(&icon_type) {
+            return Some((true, icon_type - ICON_TYPE_PASSIVE_GROUPS.start()));
+        }
+        None
     }
 
     pub fn tip(&self) -> SkillTip {
@@ -127,10 +142,48 @@ pub fn read(body: &[u8]) -> Result<Vec<Skill>, Error> {
     (0..count).map(|_| record(&mut reader)).collect()
 }
 
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<Skill>, Error> {
+    match chronicle {
+        crate::Chronicle::C4 | crate::Chronicle::Interlude => read(body),
+        crate::Chronicle::HighFive => {
+            let mut reader = DatReader::new(body);
+            let count = reader.u32()?;
+            (0..count).map(|_| record_high_five(&mut reader)).collect()
+        }
+    }
+}
+
+fn record_high_five(r: &mut DatReader<'_>) -> Result<Skill, Error> {
+    let id = r.u32()?;
+    let level = r.u32()?;
+    let icon_type = r.u32()?;
+    let oper_type = r.u32()?;
+    let mp_consume = r.u32()?;
+    let cast_range = r.i32()?;
+    let cast_style = r.u32()?;
+    let hit_time = r.f32()?;
+    let is_magic = r.i32()?;
+    let ani_char = r.unicode()?;
+    let visual_effect = r.unicode()?;
+    let icon = r.unicode()?;
+    r.unicode()?;
+    let extra_eff = r.u32()?;
+    let is_ench = r.u32()?;
+    let ench_skill_id = r.u32()?;
+    r.ascf()?;
+    let hp_consume = r.u32()?;
+    let rumble_self = r.i32()?;
+    let rumble_target = r.i32()?;
+    r.u32()?;
+    r.ascf()?;
+    Ok(Skill { id, level, icon_type: Some(icon_type), oper_type, mp_consume, cast_range, cast_style, hit_time, is_magic, ani_char, visual_effect, icon, extra_eff, is_ench, ench_skill_id, hp_consume, rumble_self, rumble_target })
+}
+
 fn record(r: &mut DatReader<'_>) -> Result<Skill, Error> {
     Ok(Skill {
         id: r.u32()?,
         level: r.u32()?,
+        icon_type: None,
         oper_type: r.u32()?,
         mp_consume: r.u32()?,
         cast_range: r.i32()?,
@@ -237,7 +290,7 @@ mod tests {
 
     fn blank() -> Skill {
         Skill {
-            id: 1, level: 3, oper_type: 0, mp_consume: 0, cast_range: -1, cast_style: 0, hit_time: 0.0, is_magic: 0,
+            id: 1, level: 3, icon_type: None, oper_type: 0, mp_consume: 0, cast_range: -1, cast_style: 0, hit_time: 0.0, is_magic: 0,
             ani_char: String::new(), visual_effect: String::new(), icon: String::new(), extra_eff: 0, is_ench: 0,
             ench_skill_id: 0, hp_consume: 0, rumble_self: 0, rumble_target: 0,
         }

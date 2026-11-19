@@ -29,7 +29,20 @@ pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Eula, Error> 
     match chronicle {
         crate::Chronicle::C4 => read(body),
         crate::Chronicle::Interlude => Ok(read_interlude(body)?.0),
+        crate::Chronicle::HighFive => Ok(read_high_five(body)?.0),
     }
+}
+
+pub fn read_high_five(body: &[u8]) -> Result<(Eula, [String; 2]), Error> {
+    let mut reader = DatReader::new(body);
+    let eula = reader.ascf()?;
+    let test_server = reader.ascf()?;
+    let extra = [reader.ascf()?, reader.ascf()?];
+    let at = body.len() - reader.remaining();
+    if reader.ascf()? != FOOTER || reader.remaining() != 0 {
+        return Err(Error::InvalidString(at));
+    }
+    Ok((Eula { eula, test_server }, extra))
 }
 
 pub fn read_interlude(body: &[u8]) -> Result<(Eula, String), Error> {

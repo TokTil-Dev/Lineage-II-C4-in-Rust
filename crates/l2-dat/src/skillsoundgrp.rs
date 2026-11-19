@@ -2,6 +2,7 @@ use crate::{DatReader, Error};
 
 pub const SLOTS: usize = 3;
 pub const RACES: usize = 15;
+pub const RACES_HIGH_FIVE: usize = 17;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sound {
@@ -22,8 +23,8 @@ pub struct SkillSound {
     pub id: i32,
     pub level: i32,
     pub slots: [EffectSlot; SLOTS],
-    pub cast: [String; RACES],
-    pub magic: [String; RACES],
+    pub cast: Vec<String>,
+    pub magic: Vec<String>,
     pub cast_volume: f32,
     pub cast_radius: f32,
 }
@@ -45,19 +46,28 @@ pub fn read(body: &[u8]) -> Result<Vec<SkillSound>, Error> {
     read_with_tail(body).map(|(rows, _)| rows)
 }
 
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<SkillSound>, Error> {
+    read_with_tail_as(body, chronicle).map(|(rows, _)| rows)
+}
+
 pub fn read_with_tail(body: &[u8]) -> Result<(Vec<SkillSound>, &[u8]), Error> {
+    read_with_tail_as(body, crate::Chronicle::C4)
+}
+
+pub fn read_with_tail_as(body: &[u8], chronicle: crate::Chronicle) -> Result<(Vec<SkillSound>, &[u8]), Error> {
+    let races = if chronicle == crate::Chronicle::HighFive { RACES_HIGH_FIVE } else { RACES };
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;
-    let rows = (0..count).map(|_| record(&mut reader)).collect::<Result<Vec<_>, _>>()?;
+    let rows = (0..count).map(|_| record(&mut reader, races)).collect::<Result<Vec<_>, _>>()?;
     Ok((rows, &body[body.len() - reader.remaining()..]))
 }
 
-fn record(r: &mut DatReader<'_>) -> Result<SkillSound, Error> {
+fn record(r: &mut DatReader<'_>, races: usize) -> Result<SkillSound, Error> {
     let id = r.i32()?;
     let level = r.i32()?;
     let slots = [slot(r)?, slot(r)?, slot(r)?];
-    let cast = names(r)?;
-    let magic = names(r)?;
+    let cast = names(r, races)?;
+    let magic = names(r, races)?;
     let cast_volume = r.f32()?;
     let cast_radius = r.f32()?;
     Ok(SkillSound { id, level, slots, cast, magic, cast_volume, cast_radius })
@@ -73,12 +83,8 @@ fn slot(r: &mut DatReader<'_>) -> Result<EffectSlot, Error> {
     Ok(EffectSlot { spell, shot, explosion })
 }
 
-fn names(r: &mut DatReader<'_>) -> Result<[String; RACES], Error> {
-    let mut out: [String; RACES] = Default::default();
-    for name in &mut out {
-        *name = r.unicode()?;
-    }
-    Ok(out)
+fn names(r: &mut DatReader<'_>, races: usize) -> Result<Vec<String>, Error> {
+    (0..races).map(|_| r.unicode()).collect()
 }
 
 #[cfg(test)]
@@ -154,8 +160,8 @@ mod tests {
                 shot: Sound { name: String::new(), volume: 0.0, radius: 0.0 },
                 explosion: Sound { name: String::new(), volume: 0.0, radius: 0.0 },
             }),
-            cast: std::array::from_fn(|_| String::new()),
-            magic: std::array::from_fn(|_| String::new()),
+            cast: vec![String::new(); RACES],
+            magic: vec![String::new(); RACES],
             cast_volume: 250.0,
             cast_radius: 50.0,
         };

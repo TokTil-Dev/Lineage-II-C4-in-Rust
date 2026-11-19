@@ -135,3 +135,29 @@ fn giran_lightmap_floor_per_slice_is_half_the_bsp_ambient_of_the_slice_middle() 
         }
     }
 }
+
+#[test]
+#[ignore]
+fn static_lightmap_texture_data_1030aeac_refuses_other_formats_over_every_tile() {
+    let Some(mut client) = test_client() else { return };
+    let (mut tiles_vistos, mut texturas, mut mips) = (0usize, 0usize, 0usize);
+    for tile in tiles() {
+        let Ok(loaded) = client.load_level(&tile) else { continue };
+        tiles_vistos += 1;
+        for grupo in &loaded.level.bsp_render.groups {
+            for textura in &grupo.textures {
+                texturas += 1;
+                for nivel in 0..textura.mips.len() {
+                    let dados = textura.texture_data(nivel, textura.format).unwrap();
+                    assert_eq!(dados, textura.mips[nivel].as_slice(), "{tile} mip {nivel}");
+                    mips += 1;
+                }
+                assert!(textura.texture_data(textura.mips.len(), textura.format).is_none());
+                let outro = textura.format.wrapping_add(1);
+                assert!(textura.texture_data(0, outro).is_none(), "{tile}: aceitou formato {outro}");
+            }
+        }
+    }
+    assert_eq!(tiles_vistos, 143);
+    assert!(texturas > 0 && mips >= texturas, "texturas {texturas}, mips {mips}");
+}

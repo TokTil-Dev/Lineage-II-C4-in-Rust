@@ -555,7 +555,7 @@ pub struct CharSelectEntry {
     pub hp: f64,
     pub mp: f64,
     pub sp: i32,
-    pub exp: i32,
+    pub exp: i64,
     pub level: i32,
     pub karma: i32,
     pub paperdoll_objects: [i32; 16],
@@ -593,7 +593,7 @@ pub fn read_char_select_info(body: &[u8]) -> Result<Vec<CharSelectEntry>> {
         let hp = r.read_f()?;
         let mp = r.read_f()?;
         let sp = r.read_d()?;
-        let exp = r.read_d()?;
+        let exp = i64::from(r.read_d()?);
         let level = r.read_d()?;
         let karma = r.read_d()?;
         for _ in 0..9 {

@@ -28,6 +28,11 @@ pub struct Recipe {
 }
 
 pub fn read(body: &[u8]) -> Result<Vec<Recipe>, Error> {
+    read_as(body, crate::Chronicle::C4)
+}
+
+pub fn read_as(body: &[u8], chronicle: crate::Chronicle) -> Result<Vec<Recipe>, Error> {
+    let high_five = chronicle == crate::Chronicle::HighFive;
     let mut reader = DatReader::new(body);
     let count = reader.u32()?;
     (0..count)
@@ -41,6 +46,9 @@ pub fn read(body: &[u8]) -> Result<Vec<Recipe>, Error> {
             let mp_consume = reader.i32()?;
             let success_rate = reader.i32()?;
             let materials = reader.i32()?;
+            if high_five {
+                reader.i32()?;
+            }
             let materials = (0..materials.max(0))
                 .map(|_| Ok(RecipeMaterial { item_id: reader.i32()?, count: reader.i32()? }))
                 .collect::<Result<_, Error>>()?;

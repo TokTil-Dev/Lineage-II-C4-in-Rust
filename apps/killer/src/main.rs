@@ -8,13 +8,20 @@ mod splash;
 mod ground;
 mod ignored;
 mod joystick;
+mod interlude_script;
 mod touch_hud;
+mod ui_interlude;
 mod input;
 mod loader;
 mod notifies;
 mod world_sound;
 mod skill_sound;
 mod lobby_c4;
+mod hud_h5;
+mod hud_h5_social;
+mod hud_h5_system;
+mod hud_h5_windows;
+mod lobby_h5;
 #[cfg(not(target_arch = "wasm32"))]
 mod ping_cache;
 mod server_ping;
@@ -86,9 +93,9 @@ use winit::event_loop::{ControlFlow, EventLoop};
 #[derive(Parser, Default)]
 #[command(name = "killer", about = "Cliente Killer")]
 struct Args {
-    #[arg(long, value_parser = ["classic", "modern"])]
+    #[arg(long, value_parser = ["classic", "modern", "interlude"])]
     hud: Option<String>,
-    #[arg(long, value_parser = ["c4", "interlude"], env = "KILLER_CHRONICLE")]
+    #[arg(long, value_parser = ["c4", "interlude", "h5"], env = "KILLER_CHRONICLE")]
     chronicle: Option<String>,
     #[arg(long, env = "KILLER_BASE_CLIENT")]
     base_client: Option<PathBuf>,
