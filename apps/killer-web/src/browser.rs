@@ -72,6 +72,20 @@ pub struct WebClient {
     demo_crowd: (usize,bool),
 }
 
+static GPU_LOST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+static GPU_MEMORY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn gpu_failure() -> Option<String> {
+    let lost=GPU_LOST.lock().ok().and_then(|slot|slot.clone());
+    let memory=GPU_MEMORY.lock().ok().and_then(|slot|slot.clone());
+    match (lost,memory) {
+        (Some(lost),Some(memory))=>Some(format!("A placa de vídeo encerrou o jogo por falta de memória ({memory}; {lost}).")),
+        (Some(lost),None)=>Some(format!("A placa de vídeo deste aparelho encerrou o jogo ({lost}).")),
+        (None,Some(memory))=>Some(format!("Memória de vídeo insuficiente neste aparelho ({memory}).")),
+        (None,None)=>None,
+    }
+}
+
 fn error(value: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&value.to_string())
 }
@@ -421,6 +435,17 @@ impl WebClient {
             .ok_or_else(|| error("WebGPU não oferece formato para o canvas"))?;
         config.format = surface.get_capabilities(&adapter).formats.into_iter()
             .find(|format| format.is_srgb()).unwrap_or(config.format);
+        if let Ok(mut slot)=GPU_LOST.lock() {*slot=None;}
+        if let Ok(mut slot)=GPU_MEMORY.lock() {*slot=None;}
+        device.set_device_lost_callback(|reason,message| {
+            if let Ok(mut slot)=GPU_LOST.lock() {*slot=Some(format!("{reason:?}: {message}"));}
+        });
+        device.on_uncaptured_error(Arc::new(|failure: wgpu::Error| match failure {
+            wgpu::Error::OutOfMemory {..}=>{
+                if let Ok(mut slot)=GPU_MEMORY.lock() && slot.is_none() {*slot=Some(failure.to_string());}
+            }
+            other=>panic!("wgpu error: {other}"),
+        }));
         surface.configure(&device, &config);
         let depth = depth(&device, config.width, config.height);
         let renderer = Renderer::new(device, queue, config.format);
@@ -717,6 +742,7 @@ impl WebClient {
     }
 
     pub fn frame(&mut self, seconds: f32) -> Result<(), JsValue> {
+        if let Some(reason)=gpu_failure() {return Err(error(reason));}
         let dt = self.previous_time.map_or(0.0, |previous| crate::pace::engine_delta(std::time::Duration::from_secs_f32((seconds-previous).max(0.0))));
         self.previous_time = Some(seconds);
         self.free_camera.advance(&self.movement, dt);
