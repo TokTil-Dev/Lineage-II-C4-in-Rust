@@ -80,13 +80,13 @@ function connect(game) {
     const current = new WebSocket(`${gateway}/${game ? 'game' : 'login'}`);
     current.binaryType = 'arraybuffer';
     socket = current;
-    current.onopen = () => {
+    current.onopen = () => idle(() => {
         if (current !== socket || !game) return;
         try { send(client.game_start()); } catch (error) { disconnected(error); }
-    };
-    current.onerror = () => { if (current === socket) disconnected(new Error('Não foi possível conectar ao gateway')); };
-    current.onclose = () => { if (current === socket) disconnected(new Error('Conexão encerrada')); };
-    current.onmessage = ({data}) => {
+    });
+    current.onerror = () => idle(() => { if (current === socket) disconnected(new Error('Não foi possível conectar ao gateway')); });
+    current.onclose = () => idle(() => { if (current === socket) disconnected(new Error('Conexão encerrada')); });
+    current.onmessage = ({data}) => idle(() => {
         if (current !== socket) return;
         try {
             if (!(data instanceof ArrayBuffer)) throw new Error('Gateway enviou mensagem não binária');
@@ -97,7 +97,7 @@ function connect(game) {
             }
             receive(data,game);
         } catch (error) { disconnected(error); }
-    };
+    });
 }
 
 function lobbyActions() {
@@ -129,9 +129,11 @@ function receive(data,game) {
 }
 
 function reportStale() {
-    if (!client || failed) return;
-    const paths=JSON.parse(client.stale_paths());
-    if (paths.length) postMessage({type:'stale',paths});
+    if (!client || failed || depth>0 || deferred.length) return;
+    try {
+        const paths=JSON.parse(client.stale_paths());
+        if (paths.length) postMessage({type:'stale',paths});
+    } catch (error) {failure(error);}
 }
 
 function refreshAll() {
@@ -164,6 +166,7 @@ async function loadWorld(tile) {
             }
             else postMessage({type:'warning',text:`Preparação em segundo plano indisponível: ${error.message}. Carregando pelos arquivos originais.`});
         }
+        await settled();
         if (epoch!==loadEpoch || failed) return;
         stage('complete','world-prepare',prepared?(prepared.hit?'cache quente':'cache frio'):'sem cache');
         status(prepared?.hit?'Instalando mapa do cache…':'Instalando mapa e interface…');
@@ -227,6 +230,7 @@ async function start(data) {
             let prepared;
             try {prepared=await preparation.run('22_22',client.settings());}
             catch (error) {postMessage({type:'warning',text:`Cache indisponível: ${error.message}`});}
+            await settled();
             if (prepared) client.load_prepared_tile('22_22',prepared.scene,prepared.trace);
             else client.load_tile('22_22');
         }
@@ -236,6 +240,7 @@ async function start(data) {
             let prepared;
             try {prepared=await preparation.run('lobby',client.settings());}
             catch (error) {postMessage({type:'warning',text:`Cache do lobby indisponível: ${error.message}`});}
+            await settled();
             stage('complete','prepare',prepared?(prepared.hit?'cache quente':'cache frio'):'sem cache');
             status('Instalando lobby…');
             if (prepared) client.load_prepared_lobby(prepared.scene);
@@ -256,6 +261,23 @@ async function start(data) {
 }
 
 let depth=0;
+const deferred=[];
+let draining=false;
+function drain() {
+    draining=false;
+    while (deferred.length && depth===0 && !failed) deferred.shift()();
+    if (deferred.length && !failed) scheduleDrain();
+}
+function scheduleDrain() {
+    if (draining) return;
+    draining=true;
+    setTimeout(drain,0);
+}
+function idle(task) {
+    if (depth>0 || deferred.length) {deferred.push(task);scheduleDrain();return;}
+    task();
+}
+const settled=()=>new Promise(resolve=>idle(resolve));
 function guarded(target) {
     return new Proxy(target,{get(object,name) {
         const value=object[name];
@@ -263,7 +285,7 @@ function guarded(target) {
         return (...args)=>{
             depth++;
             try {return value.apply(object,args);}
-            finally {depth--;}
+            finally {depth--;if (depth===0 && deferred.length) scheduleDrain();}
         };
     }});
 }
@@ -306,7 +328,9 @@ function beginFrames(initialPreferences) {
     requestAnimationFrame(frame);
 }
 
-onmessage = ({ data }) => {
+onmessage = ({ data }) => idle(()=>handle(data));
+
+function handle(data) {
     if (failed) return;
     if (data.type === 'start') { start(data).catch(failure); return; }
     if (!client) return;
@@ -351,4 +375,4 @@ onmessage = ({ data }) => {
         else if (data.type === 'server') send(client.choose_server(data.id));
         else if (data.type === 'character') {client.choose_character(data.slot);flush();status('Entrando no mundo…');}
     } catch (error) { failure(error); }
-};
+}

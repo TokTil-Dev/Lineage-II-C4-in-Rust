@@ -116,3 +116,22 @@ test('lobby frames keep rendering during background preparation without reenteri
     assert.equal(run('failed'),false);
     assert.equal(run('loading'),true);
 });
+
+test('events that arrive while the client is busy wait until it is free',()=>{
+    const {state,run}=worker();
+    run(`
+        const timers=[];
+        globalThis.setTimeout=callback=>{timers.push(callback);};
+        state.order=[];
+        client=guarded({
+            busy(){onmessage({data:{type:'pointer',values:[]}});reportStale();state.order.push('busy');},
+            pointer(){state.order.push('pointer');},
+            stale_paths(){state.order.push('stale');return '[]';},
+        });
+        client.busy();
+        state.before=state.order.slice();
+        while (timers.length) timers.shift()();
+    `);
+    assert.deepEqual(Array.from(state.before),['busy']);
+    assert.deepEqual(Array.from(state.order),['busy','pointer']);
+});
